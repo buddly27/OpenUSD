@@ -7,6 +7,7 @@
 #include "pxr/exec/vdf/isolatedSubnetwork.h"
 
 #include "pxr/exec/vdf/connection.h"
+#include "pxr/exec/vdf/network.h"
 
 #include "pxr/base/trace/trace.h"
 
@@ -17,7 +18,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 std::unique_ptr<VdfIsolatedSubnetwork>
 VdfIsolatedSubnetwork::IsolateBranch(
     VdfConnection *const connection,
-    VdfNetwork::EditFilter *const filter)
+    EditFilter canDelete)
 {
     if (!connection) {
         TF_CODING_ERROR("Null connection");
@@ -27,7 +28,7 @@ VdfIsolatedSubnetwork::IsolateBranch(
     VdfIsolatedSubnetwork *const isolated = new VdfIsolatedSubnetwork(
         &connection->GetTargetNode().GetNetwork());
 
-    if (!isolated->AddIsolatedBranch(connection, filter)) {
+    if (!isolated->AddIsolatedBranch(connection, canDelete)) {
         delete isolated;
         return nullptr;
     }
@@ -40,7 +41,7 @@ VdfIsolatedSubnetwork::IsolateBranch(
 std::unique_ptr<VdfIsolatedSubnetwork>
 VdfIsolatedSubnetwork::IsolateBranch(
     VdfNode *const node,
-    VdfNetwork::EditFilter *const filter)
+    EditFilter canDelete)
 {
     if (!node) {
         TF_CODING_ERROR("Null node");
@@ -52,14 +53,14 @@ VdfIsolatedSubnetwork::IsolateBranch(
     }
 
     // If we can't delete the initial node, we bail early.
-    if (filter && !filter->CanDelete(node)) {
+    if (!canDelete(node)) {
         return nullptr;
     }
 
     VdfIsolatedSubnetwork *const isolated =
         new VdfIsolatedSubnetwork(&node->GetNetwork());
 
-    if (!isolated->AddIsolatedBranch(node, filter)) {
+    if (!isolated->AddIsolatedBranch(node, canDelete)) {
         delete isolated;
         return nullptr;
     }
@@ -84,7 +85,7 @@ VdfIsolatedSubnetwork::New(VdfNetwork *const network)
 bool
 VdfIsolatedSubnetwork::AddIsolatedBranch(
     VdfConnection *const connection,
-    VdfNetwork::EditFilter *const filter)
+    EditFilter canDelete)
 {
     if (!connection) {
         TF_CODING_ERROR("Null connection");
@@ -105,7 +106,7 @@ VdfIsolatedSubnetwork::AddIsolatedBranch(
 
     // Collect all nodes/connections that are reachable from the input side
     // of the connection.
-    _TraverseBranch(connection, filter);
+    _TraverseBranch(connection, canDelete);
 
     return true;
 }
@@ -113,7 +114,7 @@ VdfIsolatedSubnetwork::AddIsolatedBranch(
 bool
 VdfIsolatedSubnetwork::AddIsolatedBranch(
     VdfNode *const node,
-    VdfNetwork::EditFilter *const filter)
+    EditFilter canDelete)
 {
     if (!node) {
         TF_CODING_ERROR("Null node");
@@ -133,18 +134,17 @@ VdfIsolatedSubnetwork::AddIsolatedBranch(
     }
 
     // If we can't delete the initial node, we bail early.
-    if (node->HasOutputConnections() ||
-        (filter && !filter->CanDelete(node))) {
+    if (node->HasOutputConnections() || !canDelete(node)) {
         return false;
     }
 
     // Collect all nodes/connections reachable from node.
     // Traverse up all input connections.
     for (VdfConnection *const c :  node->GetInputConnections()) {
-        _TraverseBranch(c, filter);
+        _TraverseBranch(c, canDelete);
     }
     
-    _nodes.insert(node);
+    _nodes.push_back(node);
 
     return true;
 }
@@ -176,39 +176,40 @@ VdfIsolatedSubnetwork::~VdfIsolatedSubnetwork()
 
 bool
 VdfIsolatedSubnetwork::_CanTraverse(
-    VdfConnection *connection,
-    VdfNetwork::EditFilter *filter,
-    const VdfConnectionSet &visitedConnections)
+    const VdfNode &sourceNode,
+    EditFilter canDelete)
 {
-    VdfNode &sourceNode = connection->GetSourceNode();
-
-    // Can we delete the source node of that connection? If so,
-    // recurse, else ignore this connection.
-    if (filter && !filter->CanDelete(&sourceNode)) {
+    if (!canDelete(&sourceNode)) {
         return false;
     }
 
-    // If there is more than one output connection (ie. an additional one
-    // besides the one we use to discover this node), stop traversing since
-    // other nodes are using part of the network above this point.
-    //
-    // Since we don't delete connection right away (in order to get correct 
-    // paths), we need to see what we've seen before in order to determine if
-    // there is an additional output.
-    for (VdfConnection *const connection : sourceNode.GetOutputConnections()) {
-        if (visitedConnections.count(connection) == 0) {
-            return false;
+    // Find or emplace an entry in the map where we store the number of
+    // remaining unisolated output connections for each visited node.
+    const auto [it, emplaced] =
+        _unisolatedOutputConnections.try_emplace(
+            VdfNode::GetIndexFromId(sourceNode.GetId()));
+    int& count = it.value();
+    if (emplaced) {
+        for (const auto &[_, output] : sourceNode.GetOutputsIterator()) {
+            count += output->GetNumConnections();
         }
     }
 
-    return true;
+    // Decrement to account for the output connection we just traversed to get
+    // to this node. If the new count is zero, the node is isolated and we can
+    // continue traversing.
+    --count;
+    TF_VERIFY(count >= 0);
+    return count == 0;
 }
 
 void
 VdfIsolatedSubnetwork::_TraverseBranch(
-    VdfConnection           *connection,
-    VdfNetwork::EditFilter  *filter)
+    VdfConnection *const connection,
+    EditFilter canDelete)
 {
+    TRACE_FUNCTION();
+
     std::stack<VdfConnection*> stack;
     stack.push(connection);
 
@@ -217,31 +218,30 @@ VdfIsolatedSubnetwork::_TraverseBranch(
         stack.pop();
 
         // Mark this connection as visited.
-        _connections.insert(currentConnection);
-    
-        // We can't traverse this connection, therefore we stop.
-        if (!_CanTraverse(currentConnection, filter, _connections)) {
+        const bool connectionInserted =
+            _connections.insert(currentConnection).second;
+        if (!connectionInserted) {
             continue;
         }
     
         VdfNode &sourceNode = currentConnection->GetSourceNode();
-    
-        const bool inserted = _nodes.insert(&sourceNode).second;
-    
-        // We only traverse if the object wasn't visited before. This can 
-        // happen if different inputs of the same node are connected to source 
-        // outputs of the same node.
-        if (inserted) {
-            // Push the connections onto the stack in reverse order, so that
-            // on the next iteration, the first connection lives on top of the
-            // stack and gets picked up first.
-            const VdfConnectionVector inputConnections =
-                sourceNode.GetInputConnections();
-            auto rit = inputConnections.crbegin();
-            const auto rend = inputConnections.crend();
-            for (; rit != rend; ++rit) {
-                stack.push(*rit);
-            }
+        if (!_CanTraverse(sourceNode, canDelete)) {
+            continue;
+        }
+
+        // Once _CanTraverse returns true to indicate that a node is isolated,
+        // we will never re-visit that node again.
+        _nodes.push_back(&sourceNode);
+
+        // Push the connections onto the stack in reverse order, so that
+        // on the next iteration, the first connection is the top of the
+        // stack and gets picked up first.
+        const VdfConnectionVector inputConnections =
+            sourceNode.GetInputConnections();
+        auto rit = inputConnections.crbegin();
+        const auto rend = inputConnections.crend();
+        for (; rit != rend; ++rit) {
+            stack.push(*rit);
         }
     }
 }

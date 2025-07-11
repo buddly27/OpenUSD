@@ -14,6 +14,7 @@
 #include "pxr/exec/exec/computationDefinition.h"
 
 #include "pxr/exec/esf/object.h"
+#include "pxr/exec/esf/schemaConfigKey.h"
 #include "pxr/base/tf/smallVector.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -28,14 +29,28 @@ class Exec_OutputKey
 public:
     Exec_OutputKey(
         const EsfObject &providerObject,
+        const EsfSchemaConfigKey dispatchingSchemaKey,
         const Exec_ComputationDefinition *const computationDefinition)
         : _providerObject(providerObject)
+        , _dispatchingSchemaKey(dispatchingSchemaKey)
         , _computationDefinition(computationDefinition)
     {}
 
     /// Returns the object that provides the computation.
     const EsfObject &GetProviderObject() const {
         return _providerObject;
+    }
+
+    /// Returns the schema config key that should be used for computation lookup
+    /// for any input keys that request dispatched inputs, when compiling the
+    /// node that provides the output described by this key.
+    ///
+    /// The returned config key is either the key for the output key's provider
+    /// or the key for the provider at the start of a recursive dispatched
+    /// computation chain.
+    ///
+    EsfSchemaConfigKey GetDispatchingSchemaKey() const {
+        return _dispatchingSchemaKey;
     }
 
     /// Returns the definition of the computation to compile.
@@ -51,6 +66,7 @@ public:
 
 private:
     EsfObject _providerObject;
+    EsfSchemaConfigKey _dispatchingSchemaKey;
     const Exec_ComputationDefinition *_computationDefinition;
 };
 
@@ -60,19 +76,20 @@ private:
 /// an Exec_OutputKey, while being lightweight, comparable, and hashable. They
 /// can be used, for example, as key types in hash maps.
 /// 
-/// \note Identities are not automatically maintained across scene edits.
+/// \note
+/// Identities are not automatically maintained across scene edits.
 ///
 class Exec_OutputKey::Identity
 {
 public:
     explicit Identity(const Exec_OutputKey &key)
         : _providerPath(key._providerObject->GetPath(nullptr))
-        , _computationName(key._computationDefinition->GetComputationName())
+        , _computationDefinition(key._computationDefinition)
     {}
 
     bool operator==(const Exec_OutputKey::Identity &rhs) const {
         return _providerPath == rhs._providerPath &&
-            _computationName == rhs._computationName;
+            _computationDefinition == rhs._computationDefinition;
     }
 
     bool operator!=(const Exec_OutputKey::Identity &rhs) const {
@@ -83,7 +100,7 @@ public:
     friend void TfHashAppend(
         HashState& h, const Exec_OutputKey::Identity& identity) {
         h.Append(identity._providerPath);
-        h.Append(identity._computationName);
+        h.Append(identity._computationDefinition);
     }
 
     /// Return a human-readable description of this value key for diagnostic
@@ -93,7 +110,7 @@ public:
 
 private:
     SdfPath _providerPath;
-    TfToken _computationName;
+    const Exec_ComputationDefinition *_computationDefinition;
 };
 
 Exec_OutputKey::Identity 

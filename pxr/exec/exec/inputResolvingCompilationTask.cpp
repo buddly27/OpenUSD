@@ -11,6 +11,8 @@
 #include "pxr/exec/exec/outputProvidingCompilationTask.h"
 #include "pxr/exec/exec/program.h"
 
+#include "pxr/base/arch/functionLite.h"
+#include "pxr/base/tf/mallocTag.h"
 #include "pxr/base/trace/trace.h"
 #include "pxr/exec/esf/attribute.h"
 #include "pxr/exec/esf/journal.h"
@@ -23,11 +25,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 void
 Exec_InputResolvingCompilationTask::_Compile(
     Exec_CompilationState &compilationState,
-    TaskStages &taskStages)
+    TaskPhases &taskPhases)
 {
     TRACE_FUNCTION();
+    TfAutoMallocTag tag("Exec", __ARCH_PRETTY_FUNCTION__);
 
-    taskStages.Invoke(
+    taskPhases.Invoke(
     // Generate the output key (or multiple output keys) to compile from the
     // input key, and create new subtasks for any outputs that still need to be
     // compiled.
@@ -36,8 +39,16 @@ Exec_InputResolvingCompilationTask::_Compile(
 
         // Generate all the output keys for this input.
         _outputKeys = Exec_ResolveInput(
-            compilationState.GetStage(), _originObject, _inputKey, _journal);
-        _resultOutputs->resize(_outputKeys.size());
+            compilationState.GetStage(),
+            _originObject,
+            // We use the schema config key of the dispatching prim for
+            // computation lookup if this input requests dispatched
+            // computations.
+            (_inputKey.fallsBackToDispatched
+             ? _dispatchingSchemaKey : EsfSchemaConfigKey()),
+            _inputKey,
+            _journal);
+         _resultOutputs->resize(_outputKeys.size());
 
         // For every output key, make sure it's either already available or
         // a task has been kicked off to produce it.

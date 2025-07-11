@@ -13,8 +13,6 @@
 
 #include "pxr/exec/esf/stage.h"
 
-#include <tbb/concurrent_vector.h>
-
 #include <memory>
 #include <vector>
 
@@ -23,9 +21,11 @@ PXR_NAMESPACE_OPEN_SCOPE
 class EfTime;
 class Exec_Program;
 class Exec_RequestImpl;
+class Exec_RequestTracker;
 class Exec_Runtime;
 class ExecValueKey;
 class SdfPath;
+template <typename> class TfFunctionRef;
 template <typename> class TfSpan;
 class VdfMaskedOutput;
 class VdfRequest;
@@ -64,27 +64,29 @@ protected:
     EXEC_API
     void _ChangeTime(const EfTime &time);
 
-    /// Transfer ownership of a newly-created request impl to the system.
-    ///
-    /// The system is responsible for managing the lifetime of the impl in
-    /// response to scene changes that would affect it.
-    ///
-    EXEC_API
-    void _InsertRequest(std::shared_ptr<Exec_RequestImpl> &&impl);
-
     /// Computes the values in the \p computeRequest using the provided
     /// \p schedule.
     /// 
     EXEC_API
-    void _CacheValues(
+    void _Compute(
         const VdfSchedule &schedule,
         const VdfRequest &computeRequest);
+
+    /// Invoke \p f on each outstanding exec request.
+    ///
+    /// \p f is executed with the request tracker mutex held so it must not
+    /// re-enter the request tracker.  This method may execute \p f for
+    /// multiple requests concurrently.
+    ///
+    EXEC_API
+    void _ParallelForEachRequest(
+        TfFunctionRef<void(Exec_RequestImpl&)> f) const;
 
     /// Derived systems instantiate this class to deliver scene changes to exec.
     class _ChangeProcessor;
 
 private:
-    // Requires access to _CacheValues, _Compile, and _HasPendingRecompilation.
+    // Requires access to _Compute, _Compile, and _HasPendingRecompilation.
     friend class Exec_RequestImpl;
     std::vector<VdfMaskedOutput> _Compile(TfSpan<const ExecValueKey> valueKeys);
 
@@ -112,7 +114,7 @@ private:
     std::unique_ptr<Exec_Program> _program;
     std::unique_ptr<Exec_Runtime> _runtime;
 
-    tbb::concurrent_vector<std::shared_ptr<Exec_RequestImpl>> _requests;
+    std::unique_ptr<Exec_RequestTracker> _requestTracker;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

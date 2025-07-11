@@ -17,8 +17,15 @@ EsfObjectInterface::~EsfObjectInterface() = default;
 bool
 EsfObjectInterface::IsValid(EsfJournal *journal) const
 {
+    // If the path is empty, the object is invalid, but we don't want to
+    // journal for the empty path;
+    const SdfPath path = _GetPath();
+    if (path.IsEmpty()) {
+        return false;
+    }
+
     if (journal) {
-        journal->Add(_GetPath(), EsfEditReason::ResyncedObject);
+        journal->Add(path, EsfEditReason::ResyncedObject);
     }
     return _IsValid();
 }
@@ -48,6 +55,21 @@ EsfObjectInterface::GetPrim(EsfJournal *journal) const
         journal->Add(_GetPath().GetPrimPath(), EsfEditReason::ResyncedObject);
     }
     return _GetPrim();
+}
+
+EsfSchemaConfigKey
+EsfObjectInterface::GetSchemaConfigKey(EsfJournal *journal) const
+{
+    // We need to handle the pseudo-root specially, to avoid journaling for
+    // the empty path.
+    if (_GetPath().IsAbsoluteRootPath()) {
+        return EsfSchemaConfigKey();
+    }
+
+    if (journal) {
+        journal->Add(_GetPath().GetPrimPath(), EsfEditReason::ResyncedObject);
+    }
+    return _GetSchemaConfigKey();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

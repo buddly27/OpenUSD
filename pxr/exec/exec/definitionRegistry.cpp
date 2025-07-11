@@ -15,7 +15,6 @@
 
 #include "pxr/exec/esf/attribute.h"
 #include "pxr/exec/esf/journal.h"
-#include "pxr/exec/esf/prim.h"
 
 #include "pxr/base/arch/hints.h"
 #include "pxr/base/js/types.h"
@@ -31,6 +30,43 @@
 #include <utility>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+static
+std::vector<TfType> _GetFullyExpandedSchemaTypeVector(
+    const EsfStage &stage,
+    const TfType typedSchema,
+    const TfTokenVector &appliedSchemas);
+
+namespace {
+
+// A structure used to statically initialize a map from schema type names to
+// plugin data for the named schema.
+//
+struct _ExecPluginData {
+    _ExecPluginData();
+
+    // For each schema, we record the plugin that (may) define computations for
+    // that schema and a bool that indicates whether or not the schema is
+    // allowed to have plugin computations.
+    //
+    struct SchemaData {
+        PlugPluginPtr plugin;
+        bool allowsPluginComputations;
+    };
+
+    std::unordered_map<TfType, SchemaData, TfHash> execSchemaPlugins;
+
+private:
+    void _GetPluginMetadata(const PlugPluginPtr &plugin);
+};
+
+} // anonymous namespace
+
+static TfStaticData<_ExecPluginData> execPluginData;
+
+//
+// Exec_DefinitionRegistry
+//
 
 TF_INSTANTIATE_SINGLETON(Exec_DefinitionRegistry);
 
@@ -92,6 +128,7 @@ const Exec_ComputationDefinition *
 Exec_DefinitionRegistry::GetComputationDefinition(
     const EsfPrimInterface &providerPrim,
     const TfToken &computationName,
+    const EsfSchemaConfigKey dispatchingConfigKey,
     EsfJournal *const journal) const
 {
     TRACE_FUNCTION();
@@ -117,7 +154,7 @@ Exec_DefinitionRegistry::GetComputationDefinition(
     }
 
     if (hasBuiltinPrefix) {
-        // Look for a prim builtin computation.
+        // Look for a builtin computation.
         const auto builtinIt =
             _builtinPrimComputationDefinitions.find(computationName);
         if (builtinIt != _builtinPrimComputationDefinitions.end()) {
@@ -127,33 +164,127 @@ Exec_DefinitionRegistry::GetComputationDefinition(
         return nullptr;
     }
 
-    // Otherwise, look for a plugin computation.
-
-    const TfType schemaType = providerPrim.GetType(journal);
-    if (schemaType.IsUnknown()) {
-        TF_CODING_ERROR(
-            "Unknown schema type when looking up definition for computation "
-            "'%s'", computationName.GetText());
-        return nullptr;
+    // Otherwise, look for a local plugin computation.
+    if (const Exec_ComputationDefinition *const compDef =
+        _LookUpLocalPrimComputation(providerPrim, computationName, journal)) {
+        return compDef;
+    }
+        
+    // If we didn't find a computation on the provider prim, look for a matching
+    // dispatched computation, if dispatched computations are requested.
+    if (dispatchingConfigKey != EsfSchemaConfigKey()) {
+        return _LookUpDispatchedPrimComputation(
+            providerPrim, computationName, dispatchingConfigKey, journal);
     }
 
-    // Get the composed prim definition, creating it if necesseary, and use it
-    // to look up the computation, or to determine that the requested
+    return nullptr;
+}
+
+const Exec_ComputationDefinition *
+Exec_DefinitionRegistry::_LookUpLocalPrimComputation(
+    const EsfPrimInterface &providerPrim,
+    const TfToken &computationName,
+    EsfJournal *const journal) const
+{
+    const EsfSchemaConfigKey providerSchemaConfigKey =
+        providerPrim.GetSchemaConfigKey(journal);
+
+    // Get the composed prim definition, creating it if necesseary, and use
+    // it to look up the computation, or to determine that the requested
     // computation isn't provided by this prim.
-    auto composedDefIt = _composedPrimDefinitions.find(schemaType);
+    auto composedDefIt =
+        _composedPrimDefinitions.find(providerSchemaConfigKey);
     if (composedDefIt == _composedPrimDefinitions.end()) {
+
+        // We don't journal the calls below to GetType and GetAppliedSchemas
+        // because the journaling already done by the call to
+        // GetPrimSchemaConfigKey is sufficient, since the above call
+        // combines the same information accessed by the calls below. If we
+        // did rely on journaling these calls, we would have to move them
+        // out of the check for the cache hit.
+        EsfJournal *const nullJournal = nullptr;
+
         // Note that we allow concurrent callers to race to compose prim
         // definitions, since it is safe to do so and we don't expect it to
         // happen in the common case.
-        _ComposedPrimDefinition primDef = _ComposePrimDefinition(schemaType);
+        _ComposedPrimDefinition primDef =
+            _ComposePrimDefinition(
+                providerPrim.GetStage(),
+                providerPrim.GetType(nullJournal),
+                providerPrim.GetAppliedSchemas(nullJournal));
 
         composedDefIt = _composedPrimDefinitions.emplace(
-            schemaType, std::move(primDef)).first;
+            providerSchemaConfigKey, std::move(primDef)).first;
     }
 
     const auto &compDefs = composedDefIt->second.primComputationDefinitions;
     const auto it = compDefs.find(computationName);
-    return it == compDefs.end() ? nullptr : it->second;
+    if (it != compDefs.end()) {
+        return it->second;
+    }
+
+    return nullptr;
+}
+
+const Exec_ComputationDefinition *
+Exec_DefinitionRegistry::_LookUpDispatchedPrimComputation(
+    const EsfPrimInterface &providerPrim,
+    const TfToken &computationName,
+    const EsfSchemaConfigKey dispatchingConfigKey,
+    EsfJournal *const journal) const
+{
+    if (dispatchingConfigKey == EsfSchemaConfigKey()) {
+        return nullptr;
+    }
+
+    TRACE_FUNCTION();
+
+    // The only way we can end up here is if a non-dispatched computation was
+    // found on the dispatching prim (that's the computation that had the input
+    // that requests dispatched computations that got us here), which means that
+    // we will always find a composed prim definition here.
+    const auto composedDefIt =
+        _composedPrimDefinitions.find(dispatchingConfigKey);
+    if (!TF_VERIFY(composedDefIt != _composedPrimDefinitions.end())) {
+        return nullptr;
+    }
+
+    const auto &compDefs =
+        composedDefIt->second.dispatchedPrimComputationDefinitions;
+    const auto it = compDefs.find(computationName);
+    if (it == compDefs.end()) {
+        return nullptr;
+    }
+    const Exec_PluginComputationDefinition *const compDef = it->second;
+    if (!TF_VERIFY(compDef)) {
+        return nullptr;
+    }
+
+    // If the computation has no schema restrictions, then we have a match.
+    const ExecDispatchesOntoSchemas &dispatchesOntoSchemas =
+        compDef->GetDispatchesOntoSchemas();
+    if (dispatchesOntoSchemas.empty()) {
+        return compDef;
+    }
+
+    // Otherwise, we iterate over the schema types for the prim (strongest
+    // to weakest) and see if any of them match the schema restrictions for
+    // the dispatched computation.
+    const std::vector<TfType> primSchemaTypes =
+        _GetFullyExpandedSchemaTypeVector(
+            providerPrim.GetStage(),
+            providerPrim.GetType(journal),
+            providerPrim.GetAppliedSchemas(journal));
+    for (const TfType type : primSchemaTypes) {
+        if (std::find(
+                dispatchesOntoSchemas.begin(),
+                dispatchesOntoSchemas.end(), type) !=
+            dispatchesOntoSchemas.end()) {
+            return compDef;
+        }
+    }
+
+    return nullptr;
 }
 
 const Exec_ComputationDefinition *
@@ -181,12 +312,14 @@ const Exec_ComputationDefinition *
 Exec_DefinitionRegistry::GetComputationDefinition(
     const EsfObjectInterface &providerObject,
     const TfToken &computationName,
+    const EsfSchemaConfigKey dispatchingConfigKey,
     EsfJournal *journal) const
 {
     if (providerObject.IsPrim()) {
         return GetComputationDefinition(
             *providerObject.AsPrim(),
             computationName,
+            dispatchingConfigKey,
             journal);
     }
     else if (providerObject.IsAttribute()) {
@@ -213,12 +346,15 @@ Exec_DefinitionRegistry::GetComputationDefinition(
 
 Exec_DefinitionRegistry::_ComposedPrimDefinition
 Exec_DefinitionRegistry::_ComposePrimDefinition(
-    const TfType schemaType) const
+    const EsfStage &stage,
+    const TfType typedSchema,
+    const TfTokenVector &appliedSchemas) const
 {
     TRACE_FUNCTION();
 
     // Iterate over all ancestor types of the provider's schema type, from
-    // derived to base, starting with the schema type itself. Ensure that plugin
+    // derived to base, starting with the schema type itself, followed by the
+    // fully expanded list of applied API schemas. Ensure that plugin
     // computations have been loaded for each schema type for which they are
     // registered. Add all plugin computations registered for each type to the
     // composed prim definition.
@@ -229,21 +365,14 @@ Exec_DefinitionRegistry::_ComposePrimDefinition(
     // computations, is serialized by TfRegistryManager. However, computation
     // registration *can* happen concurrently with computation lookup and prim
     // definition composition.
-    //
-    // TODO: Add support for computations that are registered for applied
-    // schemas. To do that, instead of keying off the schema type we will need
-    // to use a "configuration key" that combines the typed schema with applied
-    // schemas. We will also need to search through all applied schemas, in
-    // strength order, in addition to searching up the typed schema type
-    // hierarchy.
-
-    std::vector<TfType> schemaAncestorTypes;
-    schemaType.GetAllAncestorTypes(&schemaAncestorTypes);
 
     // Build up the composed prim definition.
     _ComposedPrimDefinition primDef;
 
-    for (const TfType type : schemaAncestorTypes) {
+    // Here, we are iterating from the strongest schema to the weakest, so the
+    // first one to emplace a given computation wins.
+    for (const TfType type : _GetFullyExpandedSchemaTypeVector(
+             stage, typedSchema, appliedSchemas)) {
         if (!_EnsurePluginComputationsLoaded(type)) {
             continue;
         }
@@ -253,11 +382,24 @@ Exec_DefinitionRegistry::_ComposePrimDefinition(
         // type, and then to merge, rather than keep searching up the type
         // hierarchy.
 
+        // Compose prim computation definitions.
         if (const auto pluginIt = _pluginPrimComputationDefinitions.find(type);
             pluginIt != _pluginPrimComputationDefinitions.end()) {
             for (const Exec_PluginComputationDefinition &computationDef :
                      pluginIt->second) {
                 primDef.primComputationDefinitions.emplace(
+                    computationDef.GetComputationName(),
+                    &computationDef);
+            }
+        }
+
+        // Compose dispatched prim computation definitions.
+        if (const auto pluginIt =
+            _pluginDispatchedPrimComputationDefinitions.find(type);
+            pluginIt != _pluginDispatchedPrimComputationDefinitions.end()) {
+            for (const Exec_PluginComputationDefinition &computationDef :
+                     pluginIt->second) {
+                primDef.dispatchedPrimComputationDefinitions.emplace(
                     computationDef.GetComputationName(),
                     &computationDef);
             }
@@ -273,12 +415,34 @@ Exec_DefinitionRegistry::_RegisterPrimComputation(
     const TfToken &computationName,
     TfType resultType,
     ExecCallbackFn &&callback,
-    Exec_InputKeyVectorRefPtr &&inputKeys)
+    Exec_InputKeyVectorRefPtr &&inputKeys,
+    std::unique_ptr<ExecDispatchesOntoSchemas> &&dispatchesOntoSchemas)
 {
     if (schemaType.IsUnknown()) {
         TF_CODING_ERROR(
             "Attempt to register computation '%s' using an unknown type.",
             computationName.GetText());
+        return;
+    }
+
+    if (_IsComputationRegistrationComplete(schemaType)) {
+        TF_CODING_ERROR(
+            "Attempt to register computation '%s' for schema %s, for which "
+            "computation registration has already been completed.",
+            computationName.GetText(),
+            schemaType.GetTypeName().c_str());
+        return;
+    }
+
+    if (const auto it = execPluginData->execSchemaPlugins.find(schemaType);
+        it != execPluginData->execSchemaPlugins.end() &&
+        !it->second.allowsPluginComputations) {
+        TF_CODING_ERROR(
+            "Attempt to register computation '%s' for schema %s, which was "
+            "declared as not allowing plugin computations by plugin '%s'.",
+            computationName.GetText(),
+            schemaType.GetTypeName().c_str(),
+            it->second.plugin->GetName().c_str());
         return;
     }
 
@@ -293,17 +457,32 @@ Exec_DefinitionRegistry::_RegisterPrimComputation(
         return;
     }
 
+    // If dispatchesOntoSchemas is non-null, the computation being registered is
+    // a dispatched computation.
+    const bool dispatched = static_cast<bool>(dispatchesOntoSchemas);
+
     const bool emplaced =
-        _pluginPrimComputationDefinitions[schemaType].emplace(
+        (dispatched
+         ? _pluginDispatchedPrimComputationDefinitions
+         : _pluginPrimComputationDefinitions)
+        [schemaType].emplace(
             resultType,
             computationName,
             std::move(callback),
-            std::move(inputKeys)).second;
+            std::move(inputKeys),
+            std::move(dispatchesOntoSchemas)).second;
 
+    // TODO: We need to allow more than one dispatched computation with a given
+    // name to be registered. E.g., it makes sense to dispatch one computation
+    // for schema A and a different computation for schema B. First, we'll have
+    // to figure out the policies that determine how we handle multiple
+    // definitions with overlapping sets of schemas to which they apply, such as
+    // how to resolve strength order and when to emit errors.
     if (!emplaced) {
         TF_CODING_ERROR(
-            "Duplicate prim computation registration for computation named "
+            "Duplicate %sprim computation registration for computation named "
             "'%s' on schema %s",
+            (dispatched ? "dispatched " : " "),
             computationName.GetText(),
             schemaType.GetTypeName().c_str());
     }
@@ -402,65 +581,6 @@ Exec_DefinitionRegistry::_RegisterBuiltinComputations()
               ExecBuiltinComputations->GetComputationTokens().size());
 }
 
-namespace {
-
-// A structure used to statically initialize a map from schema type names to
-// plugins that define computations for the named schema.
-//
-// The plugInfo that we look for here is of the form:
-//
-//     "Info": {
-//         "Exec" : {
-//             "RegistersComputationsForSchemas": [
-//                 "MySchemaType"
-//             ]
-//         }
-//     }
-//
-struct _ExecPluginData {
-    _ExecPluginData() {
-
-        // For each plugin found by plugin discovery, look for the metadata that
-        // tells us which schemas that plugin defines computations for.
-        for (const PlugPluginPtr &plugin :
-                 PlugRegistry::GetInstance().GetAllPlugins()) {
-            _GetPluginMetadata(plugin);
-        }
-    }
-
-    void _GetPluginMetadata(const PlugPluginPtr &plugin) {
-        const JsOptionalValue metadataValue =
-            JsFindValue(plugin->GetMetadata(), "Exec");
-        if (!metadataValue) {
-            return;
-        }
-
-        const JsOptionalValue schemasValue =
-            JsFindValue(
-                metadataValue->GetJsObject(),
-                "RegistersComputationsForSchemas");
-        if (!schemasValue) {
-            return;
-        }
-
-        const JsArray &array = schemasValue->GetJsArray();
-        for (const JsValue &schemaName : array) {
-            const TfType schemaType =
-                TfType::FindByName(schemaName.Get<std::string>());
-            if (TF_VERIFY(!schemaType.IsUnknown())) {
-                execSchemaPlugins.emplace(schemaType, plugin);
-            }
-        }
-    }
-
-    std::unordered_map<TfType, PlugPluginPtr, TfHash>
-    execSchemaPlugins;
-};
-
-} // anonymous namespace
-
-static TfStaticData<_ExecPluginData> execPluginData;
-
 void
 Exec_DefinitionRegistry::_DidRegisterPlugins(
     const PlugNotice::DidRegisterPlugins &notice)
@@ -500,7 +620,8 @@ Exec_DefinitionRegistry::_EnsurePluginComputationsLoaded(
     if (const auto it = execPluginData->execSchemaPlugins.find(schemaType);
         it != execPluginData->execSchemaPlugins.end()) {
 
-        if (const PlugPluginPtr plugin = it->second; TF_VERIFY(plugin)) {
+        if (const PlugPluginPtr &plugin = it->second.plugin;
+            TF_VERIFY(plugin)) {
             plugin->Load();
             return true;
         }
@@ -513,17 +634,180 @@ Exec_DefinitionRegistry::_EnsurePluginComputationsLoaded(
     return false;
 }
 
+bool
+Exec_DefinitionRegistry::_IsComputationRegistrationComplete(
+    const TfType schemaType)
+{
+    return _computationsRegisteredForSchema.find(schemaType)
+        != _computationsRegisteredForSchema.end();
+}
+
 void
 Exec_DefinitionRegistry::_SetComputationRegistrationComplete(
     const TfType schemaType)
 {
-    const bool emplaced =
-        _computationsRegisteredForSchema.emplace(schemaType, true).second;
-    if (!emplaced) {
-        TF_CODING_ERROR(
-            "Duplicate registrations of plugin computations for schema %s.",
-            schemaType.GetTypeName().c_str());
+    _computationsRegisteredForSchema.emplace(schemaType, true).second;
+}
+
+//
+// _ExecPluginData
+//
+
+_ExecPluginData::_ExecPluginData() {
+
+    // For each plugin found by plugin discovery, look for the metadata that
+    // tells us which schemas that plugin defines computations for.
+    for (const PlugPluginPtr &plugin :
+             PlugRegistry::GetInstance().GetAllPlugins()) {
+        _GetPluginMetadata(plugin);
     }
+}
+
+static bool
+_AllowsPluginComputations(const JsValue &schemaValue) {
+    const JsOptionalValue allowsPluginComputationsValue =
+        JsFindValue(schemaValue.GetJsObject(), "allowsPluginComputations");
+    if (!allowsPluginComputationsValue) {
+        // In the absense of 'allowsPluginComputations' metadata, the schema is
+        // allowsPluginComputations by default.
+        return true;
+    }
+
+    if (!allowsPluginComputationsValue->IsBool()) {
+        TF_CODING_ERROR(
+            "Exec 'allowsPluginComputations' metadatum holding type %s; "
+            "expected type bool.",
+            allowsPluginComputationsValue->GetTypeName().c_str());
+        // On error, we consider the schema to *not* allow plugin computations.
+        return false;
+    }
+
+    return allowsPluginComputationsValue->GetBool();
+}
+
+// The plugInfo that we look for here is of the form:
+//
+//     "Info": {
+//         "Exec": {
+//             "Schemas": {
+//                 "MyComputationalSchema1": {
+//                     "allowsPluginComputations": true
+//                 },
+//                 "MyComputationalSchema2": {
+//                 },
+//                 "MyNonComputationalSchema": {
+//                     "allowsPluginComputations": false
+//                 }
+//             }
+//         }
+//     }
+//
+// The boolean `allowsPluginComputations` is used to declare schemas for which
+// computations _cannot_ be registered. If `allowsPluginComputations` isn't
+// present in the plugInfo, its value defaults to true. I.e., schemas that
+// appear in the Exec/Schemas plugInfo allow plugin computations by default.
+//
+void
+_ExecPluginData::_GetPluginMetadata(const PlugPluginPtr &plugin) {
+    const JsOptionalValue metadataValue =
+        JsFindValue(plugin->GetMetadata(), "Exec");
+    if (!metadataValue) {
+        return;
+    }
+
+    const JsOptionalValue schemasValue =
+        JsFindValue(metadataValue->GetJsObject(), "Schemas");
+    if (!schemasValue) {
+        return;
+    }
+
+    for (const auto& [schemaName, schemaValue] : schemasValue->GetJsObject()) {
+        const TfType schemaType = TfType::FindByName(schemaName);
+        if (schemaType.IsUnknown()) {
+            TF_CODING_ERROR(
+                "Unknown schema type name '%s' encountered when reading Exec "
+                "plugInfo.",
+                schemaName.c_str());
+            continue;
+        }
+
+        // Attempt to emplace an entry mapping the schema type to the plugin,
+        // noting whether or not the schema allows computations to be registered
+        // for it.
+        const bool allowsPluginComputations =
+            _AllowsPluginComputations(schemaValue);
+        const auto [it, emplaced] =
+            execSchemaPlugins.emplace(
+                schemaType,
+                _ExecPluginData::SchemaData{plugin, allowsPluginComputations});
+        if (emplaced) {
+            continue;
+        }
+
+        // Emit a suitable error, since we already had an entry for this schema.
+        const PlugPluginPtr &oldPlugin = it->second.plugin;
+        const bool oldAllowsPluginComputations =
+            it->second.allowsPluginComputations;
+        if (allowsPluginComputations == oldAllowsPluginComputations) {
+            TF_CODING_ERROR(
+                "Plugin '%s' declares schema %s as %sallowing plugin "
+                "computations, but plugin '%s' already declared this schema.",
+                (allowsPluginComputations ? " " : "not "),
+                plugin->GetName().c_str(),
+                schemaType.GetTypeName().c_str(),
+                oldPlugin->GetName().c_str());
+        } else {
+            // In the case of disagreement, ensure the schema is marked as
+            // not allowing plugin computations.
+            it->second.allowsPluginComputations = false;
+
+            TF_CODING_ERROR(
+                "Plugin '%s' declares schema %s as %sallowing plugin "
+                "computations, but plugin '%s' already declared it as "
+                "%sallowing plugin computations.",
+                (allowsPluginComputations ? " " : "not "),
+                plugin->GetName().c_str(),
+                schemaType.GetTypeName().c_str(),
+                oldPlugin->GetName().c_str(),
+                (oldAllowsPluginComputations ? " " : "not "));
+        }
+    }
+}
+
+// Returns all ancestor types of the provider's schema type, from derived to
+// base, starting with the schema type itself, followed by the fully expanded
+// list of applied API schemas.
+//
+// The returned list of schemas is ordered from strongest to weakest.
+//
+static
+std::vector<TfType> _GetFullyExpandedSchemaTypeVector(
+    const EsfStage &stage,
+    const TfType typedSchema,
+    const TfTokenVector &appliedSchemas)
+{
+    std::vector<TfType> schemaTypes;
+    typedSchema.GetAllAncestorTypes(&schemaTypes);
+
+    schemaTypes.reserve(schemaTypes.size() + appliedSchemas.size());
+    for (const TfToken &schema : appliedSchemas) {
+        const auto [schemaTypeName, appliedInstance] =
+            stage->GetTypeNameAndInstance(schema);
+
+        // TODO: Add support for computations on multi-apply schemas; for now,
+        // we silently skip them.
+        if (!appliedInstance.IsEmpty()) {
+            continue;
+        }
+
+        const TfType schemaType =
+            stage->GetAPITypeFromSchemaTypeName(schemaTypeName);
+        if (!schemaType.IsUnknown()) {
+            schemaTypes.push_back(schemaType);
+        }
+    }
+
+    return schemaTypes;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

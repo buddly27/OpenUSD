@@ -74,7 +74,7 @@ TestExecGeomXformable()
     // this test relies on plugin loading.
     std::vector<ExecUsdValueKey> valueKeys {
         {usdStage->GetPrimAtPath(SdfPath("/Root/A1/B")),
-         TfToken("computeTransform")}
+         TfToken("computeLocalToWorldTransform")}
     };
 
     const ExecUsdRequest request = execSystem.BuildRequest(std::move(valueKeys));
@@ -86,10 +86,10 @@ TestExecGeomXformable()
     ExecUsdSystem::Diagnostics execSystemDiagnostics(&execSystem);
     execSystemDiagnostics.GraphNetwork("testCompiler.dot");
 
-    ExecUsdCacheView cache = execSystem.CacheValues(request);
+    ExecUsdCacheView cache = execSystem.Compute(request);
 
-    VtValue value;
-    TF_AXIOM(cache.Extract(0, &value));
+    VtValue value = cache.Get(0);
+    TF_AXIOM(!value.IsEmpty());
     const GfMatrix4d matrix = value.Get<GfMatrix4d>();
     TF_AXIOM(GfIsClose(matrix.ExtractTranslation(), GfVec3d(5, 0, 0), 1e-6));
 

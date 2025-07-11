@@ -11,14 +11,15 @@
 
 #include "pxr/exec/exec/attributeInputNode.h"
 #include "pxr/exec/exec/compiledOutputCache.h"
+#include "pxr/exec/exec/compiledLeafNodeCache.h"
 #include "pxr/exec/exec/inputKey.h"
 #include "pxr/exec/exec/nodeRecompilationInfoTable.h"
 #include "pxr/exec/exec/uncompilationTable.h"
 
-#include "pxr/base/tf/bits.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/exec/ef/leafNodeCache.h"
 #include "pxr/exec/ef/time.h"
+#include "pxr/exec/esf/schemaConfigKey.h"
 #include "pxr/exec/vdf/isolatedSubnetwork.h"
 #include "pxr/exec/vdf/maskedOutput.h"
 #include "pxr/exec/vdf/maskedOutputVector.h"
@@ -147,6 +148,27 @@ public:
         return _compiledOutputCache.Insert(outputKeyIdentity, maskedOutput);
     }
 
+    /// Gets the leaf node compiled for the given \p valueKey.
+    const EfLeafNode *GetCompiledLeafNode(const ExecValueKey &valueKey) const {
+        return _compiledLeafNodeCache.Find(valueKey);
+    }
+
+    /// Establishes that \p leafNode has been compiled for \p valueKey.
+    ///
+    /// If another leaf node has already been compiled for \p valueKey, then
+    /// this function has no effect. This is not an error.
+    ///
+    void SetCompiledLeafNode(
+        const ExecValueKey &valueKey,
+        const EfLeafNode *const leafNode) {
+        _compiledLeafNodeCache.Insert(valueKey, leafNode);
+    }
+
+    /// Returns the leaf node cache.
+    EfLeafNodeCache &GetLeafNodeCache() {
+        return _leafNodeCache;
+    }
+
     /// Returns the current generational counter of the execution network.
     size_t GetNetworkVersion() const {
         return _network.GetVersion();
@@ -183,8 +205,8 @@ public:
     /// Compilation may not create additional time input nodes and
     /// uncompilation may not remove the time input node.
     ///
-    EfTimeInputNode *GetTimeInputNode() const {
-        return _timeInputNode;
+    EfTimeInputNode &GetTimeInputNode() const {
+        return *_timeInputNode;
     }
 
     /// Returns the node with the given \p nodeId, or nullptr if no such node
@@ -258,10 +280,12 @@ public:
     void SetNodeRecompilationInfo(
         const VdfNode *node,
         const EsfObject &provider,
+        const EsfSchemaConfigKey dispatchingSchemaId,
         Exec_InputKeyVectorConstRefPtr &&inputKeys) {
         _nodeRecompilationInfoTable.SetNodeRecompilationInfo(
             node,
             provider,
+            dispatchingSchemaId,
             std::move(inputKeys));
     }
 
@@ -298,11 +322,16 @@ private:
     // Unregisters an input node from authored value initialization.
     void _UnregisterInputNode(const Exec_AttributeInputNode *inputNode);
 
-    // Flags the array of _timeDependentInputNodeOutputs as invalid.
-    void _InvalidateTimeDependentInputNodeOutputs();
+    // Notifies the program of a new or deleted connection between the time
+    // input node and the given target node.
+    // 
+    void _ChangedTimeConnections(const VdfNode &targetNode);
 
-    // Rebuilds the array of _timeDependentInputNodeOutputs.
-    const VdfMaskedOutputVector &_CollectTimeDependentInputNodeOutputs();
+    // Flags the array of _timeDependentOutputs as invalid.
+    void _InvalidateTimeDependentOutputs();
+
+    // Rebuilds the array of _timeDependentOutputs.
+    const VdfMaskedOutputVector &_CollectTimeDependentOutputs();
 
 private:
     // The compiled data flow network.
@@ -314,11 +343,15 @@ private:
     // A cache of compiled outputs keys and corresponding data flow outputs.
     Exec_CompiledOutputCache _compiledOutputCache;
 
+    // A cache of leaf nodes compiled for value keys.
+    Exec_CompiledLeafNodeCache _compiledLeafNodeCache;
+
     // Maps scene paths to data flow network that must be uncompiled in response
     // to edits to those scene paths.
     Exec_UncompilationTable _uncompilationTable;
 
-    // Collection of compiled leaf nodes.
+    // Caches traversals to quickly determine which leaf nodes are downstream of
+    // an aribrary node or output in the network.
     EfLeafNodeCache _leafNodeCache;
 
     // Collection of compiled input nodes.
@@ -330,12 +363,12 @@ private:
         tbb::concurrent_unordered_map<SdfPath, _InputNodeEntry, SdfPath::Hash>;
     _InputNodesMap _inputNodes;
 
-    // Array of outputs on input nodes, which are time dependent.
-    VdfMaskedOutputVector _timeDependentInputNodeOutputs;
+    // Array of outputs connected to the time input node.
+    VdfMaskedOutputVector _timeDependentOutputs;
 
-    // Flag indicating whether the _timeDependentInputNodeOutputs array is
-    // up-to-date or must be re-computed.
-    std::atomic<bool> _timeDependentInputNodeOutputsValid;
+    // Flag indicating whether the _timeDependentOutputs array is up-to-date or
+    // must be re-computed.
+    std::atomic<bool> _timeDependentOutputsValid;
 
     // Input nodes currently queued for initialization.
     std::vector<VdfId> _uninitializedInputNodes;

@@ -40,6 +40,11 @@ private:
     EsfObject _GetObjectAtPath(const SdfPath &path) const final;
     EsfPrim _GetPrimAtPath(const SdfPath &path) const final;
     EsfProperty _GetPropertyAtPath(const SdfPath &path) const final;
+    EsfRelationship _GetRelationshipAtPath(const SdfPath &path) const final;
+    std::pair<TfToken, TfToken> _GetTypeNameAndInstance(
+        const TfToken &apiSchemaName) const final;
+    TfType _GetAPITypeFromSchemaTypeName(
+        const TfToken &schemaTypeName) const final;
 
     UsdStageConstRefPtr _stage;
 };

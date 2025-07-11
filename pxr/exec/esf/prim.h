@@ -39,11 +39,16 @@ public:
     ESF_API ~EsfPrimInterface() override;
 
     /// \see UsdPrim::GetAppliedSchemas
-    ESF_API TfTokenVector GetAppliedSchemas(EsfJournal *journal) const;
+    ESF_API const TfTokenVector &GetAppliedSchemas(EsfJournal *journal) const;
 
     /// \see UsdPrim::GetAttribute
     ESF_API EsfAttribute GetAttribute(
-        const TfToken &attrName,
+        const TfToken &attributeName,
+        EsfJournal *journal) const;
+
+    /// \see UsdPrim::GetRelationship
+    ESF_API EsfRelationship GetRelationship(
+        const TfToken &relationshipName,
         EsfJournal *journal) const;
 
     /// \see UsdPrim::GetParent
@@ -61,10 +66,12 @@ protected:
 
 private:
     // These methods must be implemented by the scene adapter implementation.
-    virtual TfTokenVector _GetAppliedSchemas() const = 0;
+    virtual const TfTokenVector &_GetAppliedSchemas() const = 0;
     virtual EsfAttribute _GetAttribute(
-        const TfToken &attrName) const = 0;
+        const TfToken &attributeName) const = 0;
     virtual EsfPrim _GetParent() const = 0;
+    virtual EsfRelationship _GetRelationship(
+        const TfToken &relationshipName) const = 0;
     virtual TfType _GetType() const = 0;
 };
 

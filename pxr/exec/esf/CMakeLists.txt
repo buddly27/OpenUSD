@@ -12,6 +12,7 @@ pxr_library(esf
     PUBLIC_HEADERS
         api.h
         journal.h
+        schemaConfigKey.h
 
     PUBLIC_CLASSES
         attribute
@@ -21,6 +22,7 @@ pxr_library(esf
         object
         prim
         property
+        relationship
         stage
 
     RESOURCE_FILES

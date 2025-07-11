@@ -18,6 +18,7 @@
 #include "pxr/base/arch/systemInfo.h"
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/callContext.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/pathUtils.h"
@@ -40,28 +41,56 @@ PXR_NAMESPACE_USING_DIRECTIVE;
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
 
+    (appliedSchemaComputation)
     (attr)
     (attributeComputation)
     (attributeComputedValueComputation)
     (attributeName)
     (baseAndDerivedSchemaComputation)
     (derivedSchemaComputation)
+    (dispatchedPrimComputation)
+    (dispatchedPrimComputationOnCustomSchema)
     (emptyComputation)
     (missingComputation)
+    (multiApplySchemaComputation)
     (namespaceAncestorInput)
     (noInputsComputation)
+    (nonComputationalSchemaComputation)
     (primComputation)
+    (relationshipName)
     (stageAccessComputation)
     (unknownSchemaTypeComputation)
 );
 
-// A type that is not registered with TfType.
+// Attempt to register a computation for a schema type that is not registered
+// with TfType.
+//
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(TestUnknownSchemaType)
 {
     self.PrimComputation(_tokens->unknownSchemaTypeComputation)
         .Callback<double>(+[](const VdfContext &) { return 1.0; });
 }
 
+// Attempt to register a computation for a schema type that is tagged in
+// plugInfo as not allowing plugin computations.
+//
+EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(TestExecNonComputationalSchema)
+{
+    self.PrimComputation(_tokens->nonComputationalSchemaComputation)
+        .Callback<double>(+[](const VdfContext &) { return 1.0; });
+}
+
+// Attempt to register a computation for a schema type that has conflicting
+// plugInfo declarations with respect to whether or not it allows plugin
+// computations.
+//
+EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(TestExecConflictingComputationalSchema)
+{
+    self.PrimComputation(_tokens->nonComputationalSchemaComputation)
+        .Callback<double>(+[](const VdfContext &) { return 1.0; });
+}
+
+// Register computations for a typed schema.
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
     TestExecComputationRegistrationCustomSchema)
 {
@@ -83,6 +112,8 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
                 .Computation<int>(_tokens->attributeComputation),
             AttributeValue<int>(_tokens->attributeName)
                 .Required(),
+            Relationship(_tokens->relationshipName)
+                .TargetedObjects<int>(_tokens->primComputation),
             NamespaceAncestor<bool>(_tokens->primComputation)
                 .InputName(_tokens->namespaceAncestorInput)
         );
@@ -113,10 +144,22 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
                 .Computation<double>(ExecBuiltinComputations->computeValue)
         );
 
+    // A computation that is registered on both the base and derived schemas.
     self.PrimComputation(_tokens->baseAndDerivedSchemaComputation)
+        .Callback(+[](const VdfContext &) { return 1.0; });
+
+    // A dispatched prim computation.
+    self.DispatchedPrimComputation(_tokens->dispatchedPrimComputation)
+        .Callback(+[](const VdfContext &) { return 1.0; });
+
+    // A dispatched prim computation that only applies to CustomSchema.
+    self.DispatchedPrimComputation(
+        _tokens->dispatchedPrimComputationOnCustomSchema,
+        TfType::FindByName("TestExecComputationRegistrationCustomSchema"))
         .Callback(+[](const VdfContext &) { return 1.0; });
 }
 
+// Register computations for a derived typed schema.
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
     TestExecComputationRegistrationDerivedCustomSchema)
 {
@@ -132,10 +175,30 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
         );
 }
 
-// XXX:TODO
-#if 0
+// Register computations for an applied schema.
+EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
+    TestExecComputationRegistrationCustomAppliedSchema)
+{
+    // A computation that is registered only for the applied schema.
+    self.PrimComputation(_tokens->appliedSchemaComputation)
+        .Callback(+[](const VdfContext &ctx) { return 42; });
 
-// Test that clients can register schemas inside their own namespaces.
+    // A computation that is registered for the applied schema and also for a
+    // typed schema.
+    self.PrimComputation(_tokens->primComputation)
+        .Callback<double>([](const VdfContext &ctx) { ctx.SetOutput(42.0); });
+}
+
+// Register computations for a multi-apply schema.
+EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(
+    TestExecComputationRegistrationCustomMultiApplySchema)
+{
+    self.PrimComputation(_tokens->multiApplySchemaComputation)
+        .Callback(+[](const VdfContext &ctx) { return 42; });
+}
+
+// TODO: Support client code that registers schema inside their own namespaces.
+#if 0
 
 namespace client_namespace {
 
@@ -163,48 +226,120 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(TestNamespacedSchemaType)
         }                                                               \
      }()
 
-// RAII class that verifies the expected number of errors is emitted during the
-// lifetime of the object and that the commentary matches the expected error
-// strings.
+// RAII class that verifies the expected errors is emitted during the lifetime
+// of the object and that the commentary matches the expected error strings.
+//
 class ExpectedErrors {
 public:
-    ExpectedErrors(const std::set<std::string> &expectedErrors)
-        : _expectedErrors(expectedErrors)
+
+    // Expects the given number of errors to be emitted.
+    ExpectedErrors(
+        const TfCallContext &callContext,
+        const size_t numErrors)
+        : _callContext(callContext)
+        , _numErrors(numErrors)
     {
     }
 
+    // Expects the given error messages to be emitted.
+    ExpectedErrors(
+        const TfCallContext &callContext,
+        const std::set<std::string> &expectedErrors)
+        : _callContext(callContext)
+        , _expectedErrors(expectedErrors)
+        , _numErrors(_expectedErrors.size())
+    {
+    }
+
+    // Expects the given number of errors to be emitted, and we expect to find
+    // the given error messages among the, where the number of expect error
+    // messages is less than the number of expected errors.
+    //
+    ExpectedErrors(
+        const TfCallContext &callContext,
+        const size_t numErrors,
+        const std::set<std::string> &expectedErrors)
+        : _callContext(callContext)
+        , _expectedErrors(expectedErrors)
+        , _numErrors(numErrors)
+    {
+        TF_AXIOM(_expectedErrors.size() < _numErrors);
+    }
+
+    // The destructor is where we actually verify that the expected errors were
+    // emitted.
+    //
     ~ExpectedErrors() {
         const size_t numErrors = std::distance(_mark.begin(), _mark.end());
-        ASSERT_EQ(numErrors, _expectedErrors.size());
+
+        // If all that is required is an expected number of errors, return if
+        // the count matches.
+        if (_expectedErrors.empty() && numErrors == _numErrors) {
+            return;
+        }
+
+        if (numErrors != _numErrors) {
+            // Make a vector, and not a set, to make the error message clear
+            // when the same error is emitted more than once.
+            std::vector<std::string> errors;
+            for (auto it=_mark.begin(); it!=_mark.end(); ++it) {
+                errors.push_back(it->GetCommentary());
+            }
+
+            TF_FATAL_ERROR(
+                "Expected numErrors == %zu; got %zu:\n  %s\n"
+                "in %s at line %zu of %s",
+                _numErrors, numErrors,
+                TfStringJoin(errors.begin(), errors.end(), "\n  ").c_str(),
+                _callContext.GetFunction(),
+                _callContext.GetLine(),
+                _callContext.GetFile());
+        }
 
         std::set<std::string> errors;
         for (auto it=_mark.begin(); it!=_mark.end(); ++it) {
             errors.insert(it->GetCommentary());
         }
 
-        if (errors != _expectedErrors) {
-            std::set<std::string> missingErrors, unexpectedErrors;
-            std::set_difference(
-                _expectedErrors.begin(), _expectedErrors.end(),
-                errors.begin(), errors.end(),
-                std::inserter(missingErrors, missingErrors.begin()));
-            std::set_difference(
-                errors.begin(), errors.end(),
-                _expectedErrors.begin(), _expectedErrors.end(),
-                std::inserter(unexpectedErrors, unexpectedErrors.begin()));
+        std::set<std::string> missingErrors, unexpectedErrors;
+        std::set_difference(
+            _expectedErrors.begin(), _expectedErrors.end(),
+            errors.begin(), errors.end(),
+            std::inserter(missingErrors, missingErrors.begin()));
+        std::set_difference(
+            errors.begin(), errors.end(),
+            _expectedErrors.begin(), _expectedErrors.end(),
+            std::inserter(unexpectedErrors, unexpectedErrors.begin()));
 
+        // If the number of expected errors is greater than the number of
+        // expected error messages, then we have a certain number of unexpected
+        // errors that we actually expect.
+        const size_t numExpectedUnexpectedErrors =
+            _numErrors > _expectedErrors.size()
+            ? (_numErrors - _expectedErrors.size()) : 0;
+
+        if (!missingErrors.empty() ||
+            unexpectedErrors.size() != numExpectedUnexpectedErrors) {
             std::string errorMessage =
                 "Emitted errors differed from expected errors:\n";
+
             if (!missingErrors.empty()) {
                 errorMessage += TfStringPrintf(
                     "Missing:\n  %s\n",
                     TfStringJoin(missingErrors, "\n  ").c_str());
             }
-            if (!unexpectedErrors.empty()) {
+            if (unexpectedErrors.size() != numExpectedUnexpectedErrors) {
                 errorMessage += TfStringPrintf(
                     "Unexpected:\n  %s\n",
                     TfStringJoin(unexpectedErrors, "\n  ").c_str());
             }
+
+            errorMessage +=
+                TfStringPrintf(
+                    "\nin %s at line %zu of %s",
+                    _callContext.GetFunction(),
+                    _callContext.GetLine(),
+                    _callContext.GetFile());
             TF_FATAL_ERROR("%s", errorMessage.c_str());
         }
 
@@ -212,9 +347,14 @@ public:
     }
 
 private:
+    const TfCallContext _callContext;
     const std::set<std::string> _expectedErrors;
+    const size_t _numErrors;
     TfErrorMark _mark;
 };
+
+#define EXPECTED_ERRORS(name, ...)                                              \
+    ExpectedErrors name(TF_CALL_CONTEXT, __VA_ARGS__)
 
 static EsfStage
 _NewStageFromLayer(
@@ -246,44 +386,120 @@ _PrintInputKeys(
                   << "\n";
         std::cout << "  optional: " << key.optional << "\n";
     }
+
+    std::cout << std::flush;
 }
 
+// This test case needs to run first in order to encounter the errors we look
+// for here.
+//
 static void
 TestRegistrationErrors()
 {
-    ExpectedErrors expected({
+    // The errors that are emitted because of conflicting plugins aren't stable
+    // because order can vary, so they are not included among the expected error
+    // messages here.
+    EXPECTED_ERRORS(expected, 7, {
         "Attempt to register computation 'unknownSchemaTypeComputation' using "
         "an unknown type.",
+
         "Attempt to register computation '__computeTime' with a name that uses "
-        "the prefix '__', which is reserved for builtin computations."
+        "the prefix '__', which is reserved for builtin computations.",
+
+        "Attempt to register computation 'nonComputationalSchemaComputation' "
+        "for schema TestExecNonComputationalSchema, which was declared as "
+        "not allowing plugin computations by plugin "
+        "'TestExecPluginComputation'.",
+
+        "Unknown schema type name 'UnknownSchemaType' encountered when reading "
+        "Exec plugInfo."
     });
 
     // The first time we pull on the defintion registry, errors for bad
     // registrations are emitted.
-    Exec_DefinitionRegistry::GetInstance();
+    const Exec_DefinitionRegistry &reg = Exec_DefinitionRegistry::GetInstance();
+    EsfJournal *const nullJournal = nullptr;
+
+    {
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+        def ConflictingPluginRegistrationSchema "Prim"
+        {
+        }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim,
+                TfToken("conflictingRegistrationComputation"),
+                EsfSchemaConfigKey(),
+                nullJournal);
+        TF_AXIOM(primCompDef);
+    }
+
+    {
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+            def Scope "Prim" (
+                apiSchemas = ["NonComputationalSchema"]
+            ) {
+            }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim,
+                TfToken("nonComputationalSchemaComputation"),
+                EsfSchemaConfigKey(), nullJournal);
+        TF_AXIOM(!primCompDef);
+    }
+
+    {
+        // Make sure we don't find a computation that was registered on a
+        // schema with conflicting allowsPluginComputations plugInfo.
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+        def ConflictingComputationalSchema "Prim"
+        {
+        }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim,
+                TfToken("nonComputationalSchemaComputation"),
+                EsfSchemaConfigKey(), nullJournal);
+        TF_AXIOM(!primCompDef);
+    }
 }
 
+// Test that an unknown applied schema is ignored and we still find computations
+// registered for an applied schema.
+//
 static void
 TestUnknownSchemaType()
 {
     EsfJournal *const nullJournal = nullptr;
     const Exec_DefinitionRegistry &reg = Exec_DefinitionRegistry::GetInstance();
     const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
-        def TestUnknownSchemaType "Prim" {
+        def TestUnknownSchemaType "Prim" (
+            apiSchemas = ["CustomAppliedSchema"]
+        ) {
         }
     )usd");
     const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
     TF_AXIOM(prim->IsValid(nullJournal));
 
     {
-        ExpectedErrors expected({
-            "Unknown schema type when looking up definition for computation "
-            "'noInputsComputation'"
-        });
+        // Look up a computation registered for the applied schema type.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->noInputsComputation, nullJournal);
-        TF_AXIOM(!primCompDef);
+                *prim, _tokens->appliedSchemaComputation,
+                EsfSchemaConfigKey(), nullJournal);
+        TF_AXIOM(primCompDef);
     }
 }
 
@@ -304,12 +520,13 @@ TestStageBuiltinComputationOnPrim()
 
     const Exec_ComputationDefinition *const primCompDef =
         reg.GetComputationDefinition(
-            *prim, ExecBuiltinComputations->computeTime, nullJournal);
+            *prim, ExecBuiltinComputations->computeTime,
+            EsfSchemaConfigKey(), nullJournal);
     TF_AXIOM(!primCompDef);
 }
 
 static void
-TestComputationRegistration()
+TestTypedSchemaComputationRegistration()
 {
     EsfJournal *const nullJournal = nullptr;
     const Exec_DefinitionRegistry &reg = Exec_DefinitionRegistry::GetInstance();
@@ -325,7 +542,8 @@ TestComputationRegistration()
         // Look up a computation that wasn't registered.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->missingComputation, nullJournal);
+                *prim, _tokens->missingComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(!primCompDef);
     }
 
@@ -336,7 +554,8 @@ TestComputationRegistration()
         // want some kind of validation to ensure we end up with a callback.)
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->emptyComputation, nullJournal);
+                *prim, _tokens->emptyComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         ASSERT_EQ(
@@ -348,7 +567,8 @@ TestComputationRegistration()
         // Look up a computation with no inputs.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->noInputsComputation, nullJournal);
+                *prim, _tokens->noInputsComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         ASSERT_EQ(
@@ -360,7 +580,8 @@ TestComputationRegistration()
         // Look up a stage bultin computation.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *pseudoroot, ExecBuiltinComputations->computeTime, nullJournal);
+                *pseudoroot, ExecBuiltinComputations->computeTime,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         ASSERT_EQ(
@@ -372,7 +593,8 @@ TestComputationRegistration()
         // Look up a plugin computation on the stage pseudo-root.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *pseudoroot, _tokens->noInputsComputation, nullJournal);
+                *pseudoroot, _tokens->noInputsComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(!primCompDef);
     }
 
@@ -380,12 +602,13 @@ TestComputationRegistration()
         // Look up a computation with multiple inputs.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->primComputation, nullJournal);
+                *prim, _tokens->primComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         const auto inputKeys =
             primCompDef->GetInputKeys(*prim, nullJournal);
-        ASSERT_EQ(inputKeys->Get().size(), 4);
+        ASSERT_EQ(inputKeys->Get().size(), 5);
 
         _PrintInputKeys(inputKeys->Get());
 
@@ -428,6 +651,19 @@ TestComputationRegistration()
 
         {
             const Exec_InputKey &key = inputKeys->Get()[index++];
+            ASSERT_EQ(key.inputName, _tokens->primComputation);
+            ASSERT_EQ(key.computationName, _tokens->primComputation);
+            ASSERT_EQ(key.resultType, TfType::Find<int>());
+            ASSERT_EQ(key.providerResolution.localTraversal,
+                      SdfPath(".relationshipName"));
+            ASSERT_EQ(key.providerResolution.dynamicTraversal,
+                      ExecProviderResolution::DynamicTraversal::
+                          RelationshipTargetedObjects);
+            ASSERT_EQ(key.optional, true);
+        }
+
+        {
+            const Exec_InputKey &key = inputKeys->Get()[index++];
             ASSERT_EQ(key.inputName, _tokens->namespaceAncestorInput);
             ASSERT_EQ(key.computationName, _tokens->primComputation);
             ASSERT_EQ(key.resultType, TfType::Find<bool>());
@@ -442,7 +678,8 @@ TestComputationRegistration()
     {
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->stageAccessComputation, nullJournal);
+                *prim, _tokens->stageAccessComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         const auto inputKeys =
@@ -465,7 +702,7 @@ TestComputationRegistration()
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
                 *prim, _tokens->attributeComputedValueComputation,
-                nullJournal);
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         const auto inputKeys =
@@ -501,7 +738,8 @@ TestDerivedSchemaComputationRegistration()
         // Look up a computation registered for the derived schema type.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->derivedSchemaComputation, nullJournal);
+                *prim, _tokens->derivedSchemaComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
     }
 
@@ -510,7 +748,8 @@ TestDerivedSchemaComputationRegistration()
         // types.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->baseAndDerivedSchemaComputation, nullJournal);
+                *prim, _tokens->baseAndDerivedSchemaComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         // Make sure we got the definition from the derived schema (i.e., the
@@ -524,8 +763,101 @@ TestDerivedSchemaComputationRegistration()
         // Look up a computation registered for the base schema type.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, _tokens->noInputsComputation, nullJournal);
+                *prim, _tokens->noInputsComputation,
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
+    }
+}
+
+static void
+TestAppliedSchemaComputationRegistration()
+{
+    EsfJournal *const nullJournal = nullptr;
+    const Exec_DefinitionRegistry &reg = Exec_DefinitionRegistry::GetInstance();
+
+    {
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+            def Scope "Prim" (apiSchemas = ["CustomAppliedSchema"]) {
+            }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        {
+            // Look up a computation registered for the applied schema type.
+            const Exec_ComputationDefinition *const primCompDef =
+                reg.GetComputationDefinition(
+                    *prim, _tokens->appliedSchemaComputation,
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(primCompDef);
+        }
+
+        {
+            // Look up another computation, which is registered for the
+            // applied schema, with no inputs.
+            const Exec_ComputationDefinition *const primCompDef =
+                reg.GetComputationDefinition(
+                    *prim, _tokens->primComputation,
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(primCompDef);
+            const auto inputKeys =
+                primCompDef->GetInputKeys(*prim, nullJournal);
+            ASSERT_EQ(inputKeys->Get().size(), 0);
+        }
+    }
+
+    {
+        // Test computation registrations for an API schema that's applied to
+        // a prim that also has a typed schema with computation registrations.
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+            def CustomSchema "Prim" (apiSchemas = ["CustomAppliedSchema"]) {
+            }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        {
+            // Look up a computation that is only registered for the applied
+            // schema type.
+            const Exec_ComputationDefinition *const primCompDef =
+                reg.GetComputationDefinition(
+                    *prim, _tokens->appliedSchemaComputation,
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(primCompDef);
+        }
+
+        {
+            // Look up a computation that is also registered for the typed
+            // schema and verify that the typed schema wins.
+            const Exec_ComputationDefinition *const primCompDef =
+                reg.GetComputationDefinition(
+                    *prim, _tokens->primComputation,
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(primCompDef);
+            const auto inputKeys =
+                primCompDef->GetInputKeys(*prim, nullJournal);
+            ASSERT_EQ(inputKeys->Get().size(), 5);
+        }
+    }
+
+    {
+        // Test that, for now, we ignore multi-apply schemas during computation
+        // lookup.
+        const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+            def Scope "Prim" (apiSchemas = ["CustomMultiApplySchema:test"]) {
+            }
+        )usd");
+        const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+        TF_AXIOM(prim->IsValid(nullJournal));
+
+        {
+            // Look up a computation registered for the applied schema type.
+            const Exec_ComputationDefinition *const primCompDef =
+                reg.GetComputationDefinition(
+                    *prim, _tokens->multiApplySchemaComputation,
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(!primCompDef);
+        }
     }
 }
 
@@ -539,6 +871,10 @@ TestPluginSchemaComputationRegistration()
         {
         }
 
+        def CustomSchema "NonPluginPrim"
+        {
+        }
+
         def ExtraPluginComputationSchema "ExtraPrim"
         {
         }
@@ -547,20 +883,38 @@ TestPluginSchemaComputationRegistration()
     TF_AXIOM(prim->IsValid(nullJournal));
 
     {
-        ExpectedErrors expected({
-            "Duplicate registrations of plugin computations for schema "
-            "TestExecComputationRegistrationCustomSchema."
+        EXPECTED_ERRORS(expected, {
+            "Attempt to register computation 'unregisteredComputation' for "
+            "schema TestExecComputationRegistrationCustomSchema, for which "
+            "computation registration has already been completed."
         });
 
-        // Look up a computation registered in a plugin.
+        // Look up a computation registered in a plugin, causing the plugin to
+        // be loaded.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, TfToken("myComputation"), nullJournal);
+                *prim, TfToken("myComputation"),
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         const auto inputKeys =
             primCompDef->GetInputKeys(*prim, nullJournal);
         ASSERT_EQ(inputKeys->Get().size(), 2);
+
+        {
+            // Make sure we *don't* find the computation that the plugin
+            // attempted to register on CustomSchema, for which computations were
+            // already registered.
+            const EsfPrim prim =
+                stage->GetPrimAtPath(SdfPath("/NonPluginPrim"), nullJournal);
+            TF_AXIOM(prim->IsValid(nullJournal));
+
+            const Exec_ComputationDefinition *const primDef =
+                reg.GetComputationDefinition(
+                    *prim, TfToken("unregisteredComputation"),
+                    EsfSchemaConfigKey(), nullJournal);
+            TF_AXIOM(!primDef);
+        }
     }
 
     {
@@ -568,7 +922,8 @@ TestPluginSchemaComputationRegistration()
         // loaded.
         const Exec_ComputationDefinition *const primCompDef =
             reg.GetComputationDefinition(
-                *prim, TfToken("anotherComputation"), nullJournal);
+                *prim, TfToken("anotherComputation"),
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(primCompDef);
 
         const auto inputKeys =
@@ -586,7 +941,8 @@ TestPluginSchemaComputationRegistration()
 
         const Exec_ComputationDefinition *const extraPrimCompDef =
             reg.GetComputationDefinition(
-                *extraPrim, TfToken("myComputation"), nullJournal);
+                *extraPrim, TfToken("myComputation"),
+                EsfSchemaConfigKey(), nullJournal);
         TF_AXIOM(extraPrimCompDef);
 
         const auto inputKeys =
@@ -596,18 +952,89 @@ TestPluginSchemaComputationRegistration()
 }
 
 static void
+TestDispatchedComputations()
+{
+    EsfJournal *const nullJournal = nullptr;
+    const Exec_DefinitionRegistry &reg = Exec_DefinitionRegistry::GetInstance();
+    const EsfStage stage = _NewStageFromLayer(R"usd(#usda 1.0
+        def CustomSchema "Prim" {
+        }
+        def Scope "Scope" {
+        }
+    )usd");
+    const EsfPrim prim = stage->GetPrimAtPath(SdfPath("/Prim"), nullJournal);
+    TF_AXIOM(prim->IsValid(nullJournal));
+
+    const EsfPrim scope = stage->GetPrimAtPath(SdfPath("/Scope"), nullJournal);
+    TF_AXIOM(scope->IsValid(nullJournal));
+
+    {
+        // Look up a dispatched prim computation, which is keyed off of the
+        // schema config key.
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim, _tokens->dispatchedPrimComputation,
+                prim->GetSchemaConfigKey(nullJournal), nullJournal);
+        TF_AXIOM(primCompDef);
+    }
+
+    {
+        // Attempt to look up a dispatched prim computation that only dispatches
+        // onto CustomSchema.
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *scope, _tokens->dispatchedPrimComputationOnCustomSchema,
+                prim->GetSchemaConfigKey(nullJournal), nullJournal);
+        TF_AXIOM(!primCompDef);
+    }
+
+    {
+        // Look up the same dispatched prim computation on a prim with the
+        // matching schema.
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim, _tokens->dispatchedPrimComputationOnCustomSchema,
+                prim->GetSchemaConfigKey(nullJournal), nullJournal);
+        TF_AXIOM(primCompDef);
+    }
+
+    {
+        // Attempt to look up a dispatched prim computation with a different
+        // schema config key.
+
+        TF_AXIOM(prim->GetSchemaConfigKey(nullJournal) !=
+                 scope->GetSchemaConfigKey(nullJournal));
+
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *scope, _tokens->dispatchedPrimComputation,
+                scope->GetSchemaConfigKey(nullJournal), nullJournal);
+        TF_AXIOM(!primCompDef);
+    }
+
+    {
+        // Attempt to look up a dispatched prim computation with an empty
+        // schema config key.
+        const Exec_ComputationDefinition *const primCompDef =
+            reg.GetComputationDefinition(
+                *prim, _tokens->dispatchedPrimComputation,
+                EsfSchemaConfigKey(), nullJournal);
+        TF_AXIOM(!primCompDef);
+    }
+}
+
+static void
 _SetupTestPlugins()
 {
     const std::string pluginPath =
         TfStringCatPaths(
             TfGetPathName(ArchGetExecutablePath()),
-            "ExecPlugins/lib/TestExecPluginComputation*/Resources/") + "/";
+            "ExecPlugins/lib/TestExec*/Resources/") + "/";
 
     const PlugPluginPtrVector plugins =
         PlugRegistry::GetInstance().RegisterPlugins(pluginPath);
     
-    ASSERT_EQ(plugins.size(), 1);
-    ASSERT_EQ(plugins[0]->GetName(), "TestExecPluginComputation");
+    ASSERT_EQ(plugins.size(), 3);
 }
 
 int main()
@@ -627,9 +1054,11 @@ int main()
     TestRegistrationErrors();
     TestUnknownSchemaType();
     TestStageBuiltinComputationOnPrim();
-    TestComputationRegistration();
+    TestTypedSchemaComputationRegistration();
     TestDerivedSchemaComputationRegistration();
+    TestAppliedSchemaComputationRegistration();
     TestPluginSchemaComputationRegistration();
+    TestDispatchedComputations();
 
     return 0;
 }

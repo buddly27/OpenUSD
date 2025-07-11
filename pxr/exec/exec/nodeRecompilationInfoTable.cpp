@@ -9,6 +9,8 @@
 #include "pxr/exec/exec/inputKey.h"
 #include "pxr/exec/exec/nodeRecompilationInfo.h"
 
+#include "pxr/base/arch/functionLite.h"
+#include "pxr/base/tf/mallocTag.h"
 #include "pxr/exec/vdf/node.h"
 #include "pxr/exec/vdf/types.h"
 
@@ -46,8 +48,15 @@ void
 Exec_NodeRecompilationInfoTable::SetNodeRecompilationInfo(
     const VdfNode *const node,
     const EsfObject &provider,
+    const EsfSchemaConfigKey dispatchingSchemaId,
     Exec_InputKeyVectorConstRefPtr &&inputKeys)
 {
+    // TODO: This tag currently fails to collect any allocations because the
+    // tbb allocator doesn't doesn't obtain allocations from malloc. This is
+    // something we can potentially address now that we are implementing our
+    // own zero allocator.
+    TfAutoMallocTag tag("Exec", __ARCH_PRETTY_FUNCTION__);
+
     const VdfIndex nodeIndex = VdfNode::GetIndexFromId(node->GetId());
 
     // Grow the vector to ensure we can store recompilation info at `nodeIndex`.
@@ -69,7 +78,7 @@ Exec_NodeRecompilationInfoTable::SetNodeRecompilationInfo(
     // If this node index had previously stored recompilation info, then it
     // cleared the `isInfoConstructed` flag when the node was deleted. If this
     // is the first time using the _Storage at `nodeIndex`, then the flag will
-    // be false, because the memory was provided by a tbb::zero_allocator.
+    // be false, because the memory was provided by a zero allocator. 
     //
     // This flag is true iff recompilation info has been emplaced in the
     // storage's buffer, in which case it is an error to re-use this storage.
@@ -84,6 +93,7 @@ Exec_NodeRecompilationInfoTable::SetNodeRecompilationInfo(
     // Initialize recompilation info in the storage's buffer.
     ::new (storage->buffer) Exec_NodeRecompilationInfo(
         provider,
+        dispatchingSchemaId,
         std::move(inputKeys));
     storage->isInfoConstructed = true;
 }

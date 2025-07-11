@@ -12,6 +12,8 @@
 #include "pxr/exec/exec/inputResolvingCompilationTask.h"
 #include "pxr/exec/exec/program.h"
 
+#include "pxr/base/arch/functionLite.h"
+#include "pxr/base/tf/mallocTag.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/trace/trace.h"
 #include "pxr/exec/esf/editReason.h"
@@ -22,14 +24,15 @@ PXR_NAMESPACE_OPEN_SCOPE
 void
 Exec_OutputProvidingCompilationTask::_Compile(
     Exec_CompilationState &compilationState,
-    TaskStages &taskStages)
+    TaskPhases &taskPhases)
 {
     TRACE_FUNCTION();
+    TfAutoMallocTag tag("Exec", __ARCH_PRETTY_FUNCTION__);
 
     const Exec_ComputationDefinition *const computationDefinition =
         _outputKey.GetComputationDefinition();
 
-    taskStages.Invoke(
+    taskPhases.Invoke(
     // Make sure input dependencies are fulfilled
     [this, &compilationState, computationDefinition](TaskDependencies &deps) {
         TRACE_FUNCTION_SCOPE("input tasks");
@@ -56,6 +59,7 @@ Exec_OutputProvidingCompilationTask::_Compile(
                 compilationState,
                 _inputKeys->Get()[i],
                 _outputKey.GetProviderObject(),
+                _outputKey.GetDispatchingSchemaKey(),
                 &_inputSources[i],
                 &_inputJournals[i]);
         }
@@ -83,6 +87,7 @@ Exec_OutputProvidingCompilationTask::_Compile(
         compilationState.GetProgram()->SetNodeRecompilationInfo(
             node,
             _outputKey.GetProviderObject(),
+            _outputKey.GetDispatchingSchemaKey(),
             Exec_InputKeyVectorConstRefPtr(_inputKeys));
 
         for (size_t i = 0; i < _inputSources.size(); ++i) {

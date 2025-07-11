@@ -10,8 +10,10 @@
 #include "pxr/exec/esfUsd/object.h"
 #include "pxr/exec/esfUsd/prim.h"
 #include "pxr/exec/esfUsd/property.h"
+#include "pxr/exec/esfUsd/relationship.h"
 
 #include "pxr/base/tf/diagnosticLite.h"
+#include "pxr/usd/usd/schemaRegistry.h"
 
 #include <utility>
 
@@ -62,6 +64,29 @@ EsfUsd_Stage::_GetPropertyAtPath(const SdfPath &path) const
         std::in_place_type<EsfUsd_Property>,
         _stage->GetPropertyAtPath(path)
     };
+}
+
+EsfRelationship
+EsfUsd_Stage::_GetRelationshipAtPath(const SdfPath &path) const
+{
+    return {
+        std::in_place_type<EsfUsd_Relationship>,
+        _stage->GetRelationshipAtPath(path)
+    };
+}
+
+std::pair<TfToken, TfToken>
+EsfUsd_Stage::_GetTypeNameAndInstance(
+    const TfToken &apiSchemaName) const
+{
+    return UsdSchemaRegistry::GetTypeNameAndInstance(apiSchemaName);
+}
+
+TfType
+EsfUsd_Stage::_GetAPITypeFromSchemaTypeName(
+    const TfToken &schemaTypeName) const
+{
+    return UsdSchemaRegistry::GetAPITypeFromSchemaTypeName(schemaTypeName);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

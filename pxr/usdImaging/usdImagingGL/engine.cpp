@@ -20,6 +20,7 @@
 
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/light.h"
+#include "pxr/imaging/hd/noticeBatchingSceneIndex.h"
 #include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/hd/rendererPlugin.h"
 #include "pxr/imaging/hd/rendererPluginRegistry.h"
@@ -56,7 +57,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 TF_DEFINE_ENV_SETTING(USDIMAGINGGL_ENGINE_DEBUG_SCENE_DELEGATE_ID, "/",
                       "Default usdImaging scene delegate id");
 
-TF_DEFINE_ENV_SETTING(USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX, true,
+TF_DEFINE_ENV_SETTING(USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX, false,
                       "Use Scene Index API for imaging scene input");
 
 TF_DEFINE_ENV_SETTING(USDIMAGINGGL_ENGINE_ENABLE_TASK_SCENE_INDEX, true,
@@ -76,6 +77,31 @@ struct _AppSceneIndices {
 };
 
 namespace {
+
+// RAII helper to enable and disable notice batching when using the stage scene
+// index.
+class _ScopedHydraNoticeBatch
+{
+public:
+    _ScopedHydraNoticeBatch(
+         const HdNoticeBatchingSceneIndexRefPtr &noticeBatchingSceneIndex)
+        : _noticeBatchingSceneIndex(noticeBatchingSceneIndex)
+    {
+        if (_noticeBatchingSceneIndex) {
+            _noticeBatchingSceneIndex->SetBatchingEnabled(true);
+        }
+    }
+
+    ~_ScopedHydraNoticeBatch()
+    {
+        if (_noticeBatchingSceneIndex) {
+            _noticeBatchingSceneIndex->SetBatchingEnabled(false);
+        }
+    }
+
+private:
+    HdNoticeBatchingSceneIndexRefPtr _noticeBatchingSceneIndex;
+};
 
 // Use a static tracker to accommodate the use-case where an application spawns
 // multiple engines.
@@ -163,6 +189,19 @@ _CullStyleEnumToToken(UsdImagingGLCullStyle cullStyle)
 }
 
 } // anonymous namespace
+
+/// \note
+/// We conservatively release/acquire the Python GIL in most of the
+/// non-const public methods of UsdImagingGLEngine (where scene index's are
+/// mutated) using TF_PY_ALLOW_THREADS_IN_SCOPE() to avoid a deadlock when 
+/// another thread attempts to acquite the GIL while the main thread is 
+/// holding it.
+///
+/// While Hydra code is not wrapped to Python (notable exception being
+/// Usdviewq.HydraObserver), it is possible for Hydra processing on a thread
+/// to call into Python code (for example, when loading an image plugin with 
+/// Python bindings) in which case the thread will need to acquire the GIL.
+/// 
 
 //----------------------------------------------------------------------------
 // Construction
@@ -329,11 +368,12 @@ UsdImagingGLEngine::PrepareBatch(
         return;
     }
 
-    HD_TRACE_FUNCTION();
-
     if (!_CanPrepare(root)) {
         return;
     }
+    
+    HD_TRACE_FUNCTION();
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     // Scene time.
     {
@@ -372,6 +412,9 @@ UsdImagingGLEngine::PrepareBatch(
     if (!_isPopulated) {
         auto stage = root.GetStage();
         if (_GetUseSceneIndices()) {
+            _ScopedHydraNoticeBatch noticeBatch(
+                _postInstancingNoticeBatchingSceneIndex);
+
             // Set timeCodesPerSecond in HdsiSceneGlobalsSceneIndex.
             if (_appSceneIndices) {
                 if (auto &sgsi = _appSceneIndices->sceneGlobalsSceneIndex) {
@@ -554,6 +597,8 @@ UsdImagingGLEngine::RenderBatch(
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     _UpdateHydraCollection(&_renderCollection, paths, params);
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetCollection(_renderCollection);
@@ -617,8 +662,7 @@ UsdImagingGLEngine::Render(
         return;
     }
 
-    TF_PY_ALLOW_THREADS_IN_SCOPE();
-
+    // We release/acquire the GIL in PrepareBatch and RenderBatch.
     PrepareBatch(root, params);
 
     // XXX(UsdImagingPaths): This bit is weird: we get the stage from "root",
@@ -665,6 +709,8 @@ UsdImagingGLEngine::SetRootTransform(GfMatrix4d const& xf)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_GetUseSceneIndices()) {
         _rootOverridesSceneIndex->SetRootTransform(xf);
     } else {
@@ -678,6 +724,8 @@ UsdImagingGLEngine::SetRootVisibility(const bool isVisible)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_GetUseSceneIndices()) {
         _rootOverridesSceneIndex->SetRootVisibility(isVisible);
@@ -697,6 +745,8 @@ UsdImagingGLEngine::SetRenderViewport(GfVec4d const& viewport)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetRenderViewport(viewport);
     } else if (_taskController) {
@@ -712,6 +762,8 @@ UsdImagingGLEngine::SetFraming(CameraUtilFraming const& framing)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetFraming(framing);
@@ -730,6 +782,8 @@ UsdImagingGLEngine::SetOverrideWindowPolicy(
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetOverrideWindowPolicy(policy);
     } else if (_taskController) {
@@ -746,6 +800,8 @@ UsdImagingGLEngine::SetRenderBufferSize(GfVec2i const& size)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetRenderBufferSize(size);
     } else if (_taskController) {
@@ -761,6 +817,8 @@ UsdImagingGLEngine::SetWindowPolicy(CameraUtilConformWindowPolicy policy)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     // Note: Free cam uses SetCameraState, which expects the frustum to be
     // pre-adjusted for the viewport size.
@@ -779,6 +837,8 @@ UsdImagingGLEngine::SetCameraPath(SdfPath const& id)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetCameraPath(id);
@@ -811,6 +871,8 @@ UsdImagingGLEngine::SetCameraState(const GfMatrix4d& viewMatrix,
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetFreeCameraMatrices(viewMatrix, projectionMatrix);
     } else if (_taskController) {
@@ -826,6 +888,8 @@ UsdImagingGLEngine::SetLightingState(GlfSimpleLightingContextPtr const &src)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+     TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetLightingState(src);
@@ -845,6 +909,8 @@ UsdImagingGLEngine::SetLightingState(
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+     TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     // we still use _lightingContextForOpenGLState for convenience, but
     // set the values directly.
@@ -877,6 +943,8 @@ UsdImagingGLEngine::SetSelected(SdfPathVector const& paths)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_GetUseSceneIndices()) {
         _selectionSceneIndex->ClearSelection();
@@ -913,6 +981,8 @@ UsdImagingGLEngine::ClearSelected()
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_GetUseSceneIndices()) {
         _selectionSceneIndex->ClearSelection();
         return;
@@ -940,6 +1010,8 @@ UsdImagingGLEngine::AddSelected(SdfPath const &path, int instanceIndex)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_GetUseSceneIndices()) {
         _selectionSceneIndex->AddSelection(path);
         return;
@@ -965,6 +1037,8 @@ UsdImagingGLEngine::SetSelectionColor(GfVec4f const& color)
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     _selectionColor = color;
 
@@ -1040,6 +1114,8 @@ UsdImagingGLEngine::TestIntersection(
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return false;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     PrepareBatch(root, params);
 
@@ -1525,6 +1601,8 @@ UsdImagingGLEngine::_SetRenderDelegate(
             UsdImagingCreateSceneIndices(info);
 
         _stageSceneIndex = sceneIndices.stageSceneIndex;
+        _postInstancingNoticeBatchingSceneIndex =
+            sceneIndices.postInstancingNoticeBatchingSceneIndex;
         _selectionSceneIndex = sceneIndices.selectionSceneIndex;
         _sceneIndex = sceneIndices.finalSceneIndex;
 
@@ -1615,6 +1693,8 @@ UsdImagingGLEngine::SetRendererAov(TfToken const &id)
         return false;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetRenderOutputs({id});
     } else if (_taskController) {
@@ -1635,6 +1715,8 @@ UsdImagingGLEngine::SetRendererAovs(TfTokenVector const &ids)
     if (!_renderIndex->IsBprimTypeSupported(HdPrimTypeTokens->renderBuffer)) {
         return false;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetRenderOutputs(ids);
@@ -1744,6 +1826,8 @@ UsdImagingGLEngine::SetRendererSetting(TfToken const& id, VtValue const& value)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     _renderDelegate->SetRenderSetting(id, value);
 }
 
@@ -1753,6 +1837,9 @@ UsdImagingGLEngine::SetActiveRenderPassPrimPath(SdfPath const &path)
     if (ARCH_UNLIKELY(!_appSceneIndices)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     auto &sgsi = _appSceneIndices->sceneGlobalsSceneIndex;
     if (ARCH_UNLIKELY(!sgsi)) {
         return;
@@ -1767,6 +1854,9 @@ UsdImagingGLEngine::SetActiveRenderSettingsPrimPath(SdfPath const &path)
     if (ARCH_UNLIKELY(!_appSceneIndices)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     auto &sgsi = _appSceneIndices->sceneGlobalsSceneIndex;
     if (ARCH_UNLIKELY(!sgsi)) {
         return;
@@ -1816,6 +1906,8 @@ UsdImagingGLEngine::SetEnablePresentation(bool enabled)
         return;
     }
 
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+
     if (_taskControllerSceneIndex) {
         _taskControllerSceneIndex->SetEnablePresentation(enabled);
     } else if (_taskController) {
@@ -1834,6 +1926,8 @@ UsdImagingGLEngine::SetPresentationOutput(
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     _userFramebuffer = framebuffer;
     if (_taskControllerSceneIndex) {
@@ -1866,6 +1960,8 @@ UsdImagingGLEngine::InvokeRendererCommand(
     if (ARCH_UNLIKELY(!_renderDelegate)) {
         return false;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     return _renderDelegate->InvokeCommand(command, args);
 }
@@ -1956,6 +2052,8 @@ UsdImagingGLEngine::SetColorCorrectionSettings(
         !IsColorCorrectionCapable()) {
         return;
     }
+
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
 
     HdxColorCorrectionTaskParams hdParams;
     hdParams.colorCorrectionMode = colorCorrectionMode;
@@ -2103,6 +2201,9 @@ UsdImagingGLEngine::_PreSetTime(const UsdImagingGLRenderParams& params)
         // The UsdImagingStageSceneIndex has no complexity opinion.
         // We force the value here upon all prims.
         _displayStyleSceneIndex->SetRefineLevel({true, refineLevel});
+
+        _ScopedHydraNoticeBatch noticeBatch(
+                _postInstancingNoticeBatchingSceneIndex);
 
         _stageSceneIndex->ApplyPendingUpdates();
     } else {
@@ -2288,7 +2389,8 @@ UsdImagingGLEngine::_GetDefaultRendererPluginId()
 
     // Look for the one with the matching display name
     for (size_t i = 0; i < pluginDescs.size(); ++i) {
-        if (pluginDescs[i].displayName == defaultRendererDisplayName) {
+        if (pluginDescs[i].displayName == defaultRendererDisplayName
+        ||  pluginDescs[i].id == defaultRendererDisplayName) {
             return pluginDescs[i].id;
         }
     }

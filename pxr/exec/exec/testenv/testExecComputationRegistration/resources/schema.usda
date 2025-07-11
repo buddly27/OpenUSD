@@ -28,14 +28,44 @@ class DerivedCustomSchema "DerivedCustomSchema" (
 {
 }
 
-class CustomSchema "PluginComputationSchema" (
+class PluginComputationSchema "PluginComputationSchema" (
     inherits = </Typed>
 )
 {
 }
 
-class CustomSchema "ExtraPluginComputationSchema" (
+class ExtraPluginComputationSchema "ExtraPluginComputationSchema" (
     inherits = </Typed>
+)
+{
+}
+
+class ConflictingPluginRegistrationSchema "ConflictingPluginRegistrationSchema" {
+    inherits = </Typed>
+)
+{
+}
+
+class ConflictingComputationalSchema "ConflictingComputationalSchema" {
+    inherits = </Typed>
+)
+{
+}
+
+class "CustomAppliedSchema" (
+    inherits = </APISchemaBase>
+)
+{
+}
+
+class "CustomMultiApplySchema" (
+    inherits = </APISchemaBase>
+)
+{
+}
+
+class "NonComputationalSchema" (
+    inherits = </APISchemaBase>
 )
 {
 }

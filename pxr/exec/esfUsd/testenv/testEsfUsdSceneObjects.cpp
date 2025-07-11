@@ -52,6 +52,15 @@ struct Fixture
                     1: 0,
                     2: 1,
                 }
+                rel rel1
+            }
+            def Scope "Prim2" (
+                prepend apiSchemas = ["CollectionAPI:collection1"]
+            ) {
+            }
+            def Scope "Prim3" (
+                prepend apiSchemas = ["CollectionAPI:collection2"]
+            ) {
             }
             )usd");
         TF_AXIOM(importedLayer);
@@ -61,10 +70,12 @@ struct Fixture
     }
 };
 
-void TestStage(Fixture &fixture)
-{
-    // Tests that EsfUsd_Stage behaves as UsdStage.
+} // anonymous namespace
 
+// Tests that EsfUsd_Stage behaves as UsdStage.
+static void
+TestStage(Fixture &fixture)
+{
     const EsfStage stage = EsfUsdSceneAdapter::AdaptStage(fixture.stage);
 
     const EsfPrim prim = stage->GetPrimAtPath(
@@ -80,10 +91,10 @@ void TestStage(Fixture &fixture)
     TF_AXIOM(prop->IsValid(fixture.journal));
 }
 
-void TestObject(Fixture &fixture)
+// Tests that ExecUsd_Objects behave as UsdObjects.
+static void
+TestObject(Fixture &fixture)
 {
-    // Tests that ExecUsd_Objects behave as UsdObjects.
-
     const EsfObject primObject = EsfUsdSceneAdapter::AdaptObject(
         fixture.stage->GetObjectAtPath(SdfPath("/Prim1")));
     TF_AXIOM(primObject->IsValid(fixture.journal));
@@ -92,15 +103,19 @@ void TestObject(Fixture &fixture)
         fixture.stage->GetObjectAtPath(SdfPath("/Prim1.attr1")));
     TF_AXIOM(attrObject->IsValid(fixture.journal));
 
+    const EsfObject relObject = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim1.rel1")));
+    TF_AXIOM(relObject->IsValid(fixture.journal));
+
     const EsfObject invalidObject = EsfUsdSceneAdapter::AdaptObject(
         fixture.stage->GetObjectAtPath(SdfPath("/Does/Not/Exist")));
     TF_AXIOM(!invalidObject->IsValid(fixture.journal));
 }
 
-void TestPrim(Fixture &fixture)
+// Tests that ExecUsd_Prims behave as UsdPrims.
+static void
+TestPrim(Fixture &fixture)
 {
-    // Tests that ExecUsd_Prims behave as UsdPrims.
-
     const EsfPrim prim = EsfUsdSceneAdapter::AdaptPrim(
         fixture.stage->GetPrimAtPath(SdfPath("/Prim1")));
     TF_AXIOM(prim->IsValid(fixture.journal));
@@ -121,10 +136,10 @@ void TestPrim(Fixture &fixture)
     TF_AXIOM(attr->GetPath(fixture.journal) == SdfPath("/Prim1.attr1"));
 }
 
-void TestProperty(Fixture &fixture)
+// Tests that ExecUsd_Properties behave as UsdProperties.
+static void
+TestProperty(Fixture &fixture)
 {
-    // Tests that ExecUsd_Properties behave as UsdProperties.
-
     const EsfProperty prop = EsfUsdSceneAdapter::AdaptProperty(
         fixture.stage->GetPropertyAtPath(SdfPath("/Prim1.ns1:ns2:attr2")));
     TF_AXIOM(prop->IsValid(fixture.journal));
@@ -133,10 +148,10 @@ void TestProperty(Fixture &fixture)
     TF_AXIOM(prop->GetNamespace(fixture.journal) == TfToken("ns1:ns2"));
 }
 
-void TestAttribute(Fixture &fixture)
+// Tests that ExecUsd_Attributes behave as UsdAttributes.
+static void
+TestAttribute(Fixture &fixture)
 {
-    // Tests that ExecUsd_Attributes behave as UsdAttributes.
-
     const EsfAttribute attr = EsfUsdSceneAdapter::AdaptAttribute(
         fixture.stage->GetAttributeAtPath(SdfPath("/Prim1.attr1")));
     TF_AXIOM(attr->IsValid(fixture.journal));
@@ -145,10 +160,10 @@ void TestAttribute(Fixture &fixture)
 }
 
 
-void TestAttributeQuery(Fixture &fixture)
+// Tests that ExecUsd_AttributeQuery behaves as UsdAttributeQuery.
+static void
+TestAttributeQuery(Fixture &fixture)
 {
-    // Tests that ExecUsd_AttributeQuery behaves as UsdAttributeQuery.
-
     const UsdAttribute usdAttr =
         fixture.stage->GetAttributeAtPath(SdfPath("/Prim1.attr1"));
     const UsdAttributeQuery usdQuery(usdAttr);
@@ -172,10 +187,10 @@ void TestAttributeQuery(Fixture &fixture)
         UsdTimeCode::Default(), UsdTimeCode(0.0)));
 }
 
-void TestSplineAttributeQuery(Fixture &fixture)
+// Tests ExecUsd_AttributeQuery with a time-varying spline attribute.
+static void
+TestSplineAttributeQuery(Fixture &fixture)
 {
-    // Tests ExecUsd_AttributeQuery with a time-varying spline attribute.
-
     const UsdAttribute usdAttr =
         fixture.stage->GetAttributeAtPath(SdfPath("/Prim1.attr3"));
     const UsdAttributeQuery usdQuery(usdAttr);
@@ -199,18 +214,58 @@ void TestSplineAttributeQuery(Fixture &fixture)
     TF_AXIOM(!esfQuery->IsTimeVarying(UsdTimeCode(2.0), UsdTimeCode(3.0)));
 }
 
+static void
+TestGetSchemaConfigKey(Fixture &fixture)
+{
+    const EsfObject pseudoRootObject = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/")));
+    TF_AXIOM(pseudoRootObject->IsValid(fixture.journal));
+    
+    const EsfObject prim1Object = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim1")));
+    TF_AXIOM(prim1Object->IsValid(fixture.journal));
+
+    const EsfObject attrObject = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim1.attr1")));
+    TF_AXIOM(attrObject->IsValid(fixture.journal));
+
+    const EsfObject relObject = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim1.rel1")));
+    TF_AXIOM(relObject->IsValid(fixture.journal));
+
+    const EsfObject prim2Object = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim2")));
+    TF_AXIOM(prim2Object->IsValid(fixture.journal));
+
+    const EsfObject prim3Object = EsfUsdSceneAdapter::AdaptObject(
+        fixture.stage->GetObjectAtPath(SdfPath("/Prim3")));
+    TF_AXIOM(prim3Object->IsValid(fixture.journal));
+
+    TF_AXIOM(pseudoRootObject->GetSchemaConfigKey(fixture.journal) ==
+             EsfSchemaConfigKey());
+    TF_AXIOM(prim1Object->GetSchemaConfigKey(fixture.journal) !=
+             EsfSchemaConfigKey());
+    TF_AXIOM(attrObject->GetSchemaConfigKey(fixture.journal) ==
+             prim1Object->GetSchemaConfigKey(fixture.journal));
+    TF_AXIOM(relObject->GetSchemaConfigKey(fixture.journal) ==
+             prim1Object->GetSchemaConfigKey(fixture.journal));
+    TF_AXIOM(prim1Object->GetSchemaConfigKey(fixture.journal) ==
+             prim2Object->GetSchemaConfigKey(fixture.journal));
+    TF_AXIOM(prim1Object->GetSchemaConfigKey(fixture.journal) !=
+             prim3Object->GetSchemaConfigKey(fixture.journal));
 }
 
 int main()
 {
-    std::vector tests {
+    const std::vector tests {
         TestStage,
         TestObject,
         TestPrim,
         TestProperty,
         TestAttribute,
         TestAttributeQuery,
-        TestSplineAttributeQuery
+        TestSplineAttributeQuery,
+        TestGetSchemaConfigKey
     };
     for (auto test : tests) {
         Fixture fixture;

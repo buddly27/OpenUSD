@@ -29,6 +29,7 @@ pxr_library(exec
         builtinComputations
         cacheView
         computationBuilders
+        debugCodes
         requestImpl
         system
         systemChangeProcessor
@@ -50,6 +51,7 @@ pxr_library(exec
         builtinStageComputations
         callbackNode
         compilationTask
+        compiledLeafNodeCache
         compiledOutputCache
         compiler
         compilerTaskSync
@@ -63,11 +65,14 @@ pxr_library(exec
         nodeRecompilationInfoTable
         outputKey
         outputProvidingCompilationTask
+        pluginComputationDefinition
         program
         registrationBarrier
+        requestTracker
         runtime
         uncompilationRuleSet
         uncompilationTable
+        uncompilationTarget
         uncompiler
         valueExtractor
 
@@ -84,12 +89,31 @@ pxr_library(exec
 pxr_build_test_shared_lib(TestExecPluginComputation
     INSTALL_PREFIX ExecPlugins
     LIBRARIES
-        gf
         tf
         exec
         
     CPPFILES
         testenv/TestExecPluginComputation.cpp
+)
+
+pxr_build_test_shared_lib(TestExecConflictingPluginRegistration1
+    INSTALL_PREFIX ExecPlugins
+    LIBRARIES
+        tf
+        exec
+        
+    CPPFILES
+        testenv/TestExecConflictingPluginRegistration1.cpp
+)
+
+pxr_build_test_shared_lib(TestExecConflictingPluginRegistration2
+    INSTALL_PREFIX ExecPlugins
+    LIBRARIES
+        tf
+        exec
+        
+    CPPFILES
+        testenv/TestExecConflictingPluginRegistration2.cpp
 )
 
 # Build tests

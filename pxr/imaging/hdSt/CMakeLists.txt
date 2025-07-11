@@ -46,12 +46,11 @@ pxr_library(hdSt
         sdr
         tf
         trace
-        ${TBB_tbb_LIBRARY}
+        TBB::tbb
         ${OPENSUBDIV_LIBRARIES}
         ${optionalLibs}
 
     INCLUDE_DIRS
-        ${TBB_INCLUDE_DIRS}
         ${OPENSUBDIV_INCLUDE_DIR}
         ${optionalIncludeDirs}
 
@@ -131,6 +130,7 @@ pxr_library(hdSt
         textureUtils
         tokens
         udimTextureObject
+        unboundMaterialPruningSceneIndexPlugin
         unitTestGLDrawing
         vboMemoryManager
         vboSimpleMemoryManager

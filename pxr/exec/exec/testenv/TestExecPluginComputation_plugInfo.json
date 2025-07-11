@@ -3,9 +3,16 @@
         {
             "Info": {
                 "Exec" : {
-                    "RegistersComputationsForSchemas": [
-                        "TestExecPluginComputationSchema"
-                    ]
+                    "Schemas": {
+                        "TestExecPluginComputationSchema": {
+                        },
+                        "TestExecNonComputationalSchema": {
+                            "allowsPluginComputations": false
+                        },
+                        "UnknownSchemaType": {
+                            "allowsPluginComputations": false
+                        }
+                    }
                 }
             },
             "LibraryPath": "@TEST_PLUG_INFO_LIBRARY_PATH@",

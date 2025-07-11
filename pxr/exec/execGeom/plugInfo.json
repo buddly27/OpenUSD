@@ -3,9 +3,14 @@
         {
             "Info": {
                 "Exec" : {
-                    "RegistersComputationsForSchemas": [
-                        "UsdGeomXformable"
-                    ]
+                    "Schemas": {
+                        "UsdGeomXformable": {
+                            "allowsPluginComputations": true
+                        },
+                        "UsdGeomScope": {
+                            "allowsPluginComputations": false
+                        }
+                    }
                 }
             },
             "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",

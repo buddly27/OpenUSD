@@ -8,16 +8,21 @@
 
 #include "pxr/exec/esfUsd/attribute.h"
 #include "pxr/exec/esfUsd/prim.h"
+#include "pxr/exec/esfUsd/relationship.h"
+#include "pxr/exec/esfUsd/stage.h"
 
 #include "pxr/base/tf/token.h"
 #include "pxr/exec/esf/attribute.h"
 #include "pxr/exec/esf/object.h"
 #include "pxr/exec/esf/prim.h"
 #include "pxr/exec/esf/property.h"
+#include "pxr/exec/esf/relationship.h"
+#include "pxr/exec/esf/stage.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/object.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/property.h"
+#include "pxr/usd/usd/relationship.h"
 
 #include <utility>
 
@@ -52,6 +57,30 @@ EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::_GetPrim() const
 }
 
 template <class InterfaceType, class UsdObjectType>
+EsfStage
+EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::_GetStage() const
+{
+    return {std::in_place_type<EsfUsd_Stage>, _GetWrapped().GetStage()};
+}
+
+template <class InterfaceType, class UsdObjectType>
+EsfSchemaConfigKey
+EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::_GetSchemaConfigKey() const
+{
+    // We use the address of the UsdPrimTypeInfo as the schema config key, since
+    // it is unique to the set of types and applied schemas for the prim and it
+    // is stable, since it is guaranteed to stay alive at least as long as the
+    // UsdStage.
+    if constexpr (std::is_base_of_v<UsdPrim, UsdObjectType>) {
+        return EsfObjectInterface::CreateSchemaConfigKey(
+            &_GetWrapped().GetPrimTypeInfo());
+    } else {
+        return EsfObjectInterface::CreateSchemaConfigKey(
+            &_GetWrapped().GetPrim().GetPrimTypeInfo());
+    }
+}
+
+template <class InterfaceType, class UsdObjectType>
 bool
 EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::IsPrim() const
 {
@@ -63,6 +92,13 @@ bool
 EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::IsAttribute() const
 {
     return _GetWrapped().template Is<UsdAttribute>();
+}
+
+template <class InterfaceType, class UsdObjectType>
+bool
+EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::IsRelationship() const
+{
+    return _GetWrapped().template Is<UsdRelationship>();
 }
 
 template <class InterfaceType, class UsdObjectType>
@@ -95,10 +131,21 @@ EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::AsAttribute() const
     };
 }
 
+template <class InterfaceType, class UsdObjectType>
+EsfRelationship
+EsfUsd_ObjectImpl<InterfaceType, UsdObjectType>::AsRelationship() const
+{
+    return {
+        std::in_place_type<EsfUsd_Relationship>,
+        _GetWrapped().template As<UsdRelationship>()
+    };
+}
+
 // Explicit template instantiations.
 template class EsfUsd_ObjectImpl<EsfAttributeInterface, UsdAttribute>;
 template class EsfUsd_ObjectImpl<EsfObjectInterface, UsdObject>;
 template class EsfUsd_ObjectImpl<EsfPrimInterface, UsdPrim>;
 template class EsfUsd_ObjectImpl<EsfPropertyInterface, UsdProperty>;
+template class EsfUsd_ObjectImpl<EsfRelationshipInterface, UsdRelationship>;
 
 PXR_NAMESPACE_CLOSE_SCOPE

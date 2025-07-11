@@ -9,7 +9,7 @@
 def "GLOBAL" (
     customData = {
         string libraryName      = "testExecUsdRecompilation"
-        string libraryPath      = "pxr/exec/exec"
+        string libraryPath      = "pxr/exec/execUsd"
         bool skipCodeGeneration = true
     }
 )
@@ -18,6 +18,12 @@ def "GLOBAL" (
 
 class CustomSchema "CustomSchema" (
     inherits = </Typed>
+)
+{
+}
+
+class "CustomAppliedSchema" (
+    inherits = </APISchemaBase>
 )
 {
 }

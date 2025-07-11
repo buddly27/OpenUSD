@@ -14,6 +14,7 @@ pxr_library(hdsi
         hf
         hd
         pxOsd
+        TBB::tbb
 
     PUBLIC_CLASSES
         computeSceneIndexDiff
@@ -41,6 +42,7 @@ pxr_library(hdsi
         sceneGlobalsSceneIndex
         switchingSceneIndex
         tetMeshConversionSceneIndex
+        unboundMaterialPruningSceneIndex
         utils
         velocityMotionResolvingSceneIndex
 
